@@ -1,0 +1,36 @@
+# venv
+.venv/
+venv/
+env/
+
+# environment secrets
+.env
+
+# runtime artifacts
+.cache/
+runs/*.json
+output/*.xlsx
+output/*.csv
+output/*.json
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+
+# streamlit
+.streamlit/
+
+# editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# temp test scripts (out of tree)
+# temp scripts under %TEMP% are already excluded by path
+
+# keep this file so the dirs exist for first-time setup
+!.gitkeep

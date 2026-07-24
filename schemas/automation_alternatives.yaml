@@ -1,0 +1,188 @@
+name: automation_alternatives
+version: 1
+entity_label: Product
+description: >-
+  Comparison dataset for "automation platform alternatives" style pages. One row per
+  product. Column labels match the client's spreadsheet exactly so exports can be
+  pasted straight in.
+
+# Input sheet "Node" values. Each URL is tagged with one of these, and a node
+# determines which columns that page is allowed to answer.
+nodes:
+  - Capabilities
+  - Pricing
+  - "Strengths, limitations, best for"
+
+list_output: semicolon
+
+fields:
+  - key: alternative_name
+    label: Alternative name
+    question: The canonical product name.
+    shape: short_text
+    fill_from: entity
+
+  - key: the_products
+    label: The products
+    question: >-
+      Does it contain multiple products or modules, such as business process automation,
+      iPaaS, an interface builder, or a document processor?
+    guidance: >-
+      Name each distinct product or module. If it is a single unified product, say so
+      explicitly rather than returning nothing.
+    shape: list
+    max_items: 8
+    nodes: [Capabilities]
+
+  - key: key_capabilities_product
+    label: Key capabilities (product)
+    question: >-
+      What key capabilities does the core product have? Visual workflow building? A
+      library of nodes? Branching and conditional logic?
+    guidance: >-
+      Also consider scheduling, error handling and retries, debugging, versioning,
+      reusable sub-workflows, and code steps.
+    shape: list
+    max_items: 12
+    nodes: [Capabilities]
+
+  - key: key_capabilities_integrations
+    label: Key capabilities (integrations)
+    question: >-
+      How does it integrate with external systems, APIs, apps and data sources, and how
+      many pre-built integrations does it have?
+    guidance: >-
+      Quote the integration count verbatim when the page states one, including the date
+      or version if given. Note generic HTTP/webhook/database access separately from
+      named connectors.
+    shape: list
+    max_items: 10
+    nodes: [Capabilities]
+
+  - key: key_capabilities_deployment
+    label: Key capabilities (deployment)
+    question: What deployment options exist?
+    guidance: >-
+      Consider vendor cloud/SaaS, self-hosted, on-premise, hybrid, private cloud,
+      containers, and desktop. Note any option restricted to a paid tier.
+    shape: list
+    max_items: 8
+    nodes: [Capabilities, Pricing]
+
+  - key: key_capabilities_governance
+    label: Key capabilities (governance)
+    question: What governance capabilities does it have? Audit logs, RBAC, something else?
+    guidance: >-
+      Consider audit logs, role-based access control, SSO/SAML/LDAP, environments,
+      approval flows, version control, and project or folder separation.
+    shape: list
+    max_items: 10
+    nodes: [Capabilities, Pricing]
+
+  - key: key_capabilities_privacy_security
+    label: Key capabilities (privacy and security)
+    question: What capabilities does it have that ensure data privacy and security?
+    guidance: >-
+      Consider encryption in transit and at rest, data residency, secrets management,
+      and compliance certifications such as SOC 2, ISO 27001, HIPAA and GDPR. Only list
+      certifications the page actually claims.
+    shape: list
+    max_items: 10
+    nodes: [Capabilities]
+
+  - key: key_capabilities_ai
+    label: Key capabilities (AI)
+    question: >-
+      What AI capabilities does it have? Generating workflows from an AI chat? AI-driven
+      workflow testing?
+    guidance: >-
+      Consider AI agent nodes, LLM provider connectors, vector stores, RAG support,
+      natural-language workflow generation, and AI copilots for building or debugging.
+    shape: list
+    max_items: 10
+    nodes: [Capabilities]
+
+  - key: pricing_format
+    label: Pricing (format)
+    question: Is it open-source, freemium, free-trial-based, or gated?
+    guidance: >-
+      Name the licence when the page states one (for example fair-code, Sustainable Use
+      License, Apache 2.0). Combinations are common: say so.
+    shape: short_text
+    nodes: [Pricing]
+
+  - key: pricing_value_event
+    label: Pricing (value-event)
+    question: >-
+      Is pricing based on number of users, number of workflow runs, minutes of compute,
+      or something else?
+    guidance: >-
+      State the billable unit precisely. Note whether individual steps within a run are
+      counted or whether a whole execution counts once.
+    shape: short_text
+    nodes: [Pricing]
+
+  - key: pricing_starting_from
+    label: Pricing (Starting from)
+    question: What is the minimum price one can pay to use it meaningfully?
+    guidance: >-
+      Give the lowest recurring paid price with currency and period, and state whether it
+      is billed monthly or annually. Mention a free or self-hosted tier separately if one
+      exists.
+    shape: short_text
+    nodes: [Pricing]
+
+  - key: what_it_is
+    label: What it is
+    question: What is the product and what is it for?
+    guidance: Describe what it does and who it serves. Avoid marketing language.
+    shape: prose
+    # No `nodes` restriction: every page gets a chance to answer this one.
+
+  - key: strengths
+    label: Strengths
+    question: What are the strengths of the product?
+    guidance: >-
+      Each point must be a specific, verifiable capability or advantage, not a slogan.
+    shape: list
+    max_items: 12
+    nodes: ["Strengths, limitations, best for"]
+
+  - key: limitations
+    label: Limitations
+    question: What are the limitations of the product?
+    guidance: >-
+      Include practical constraints such as operational burden, missing features, tier
+      gating, scaling ceilings, and learning curve. Be concrete.
+    shape: list
+    max_items: 12
+    nodes: ["Strengths, limitations, best for"]
+
+  - key: best_for_use_cases
+    label: Best for (use-cases)
+    question: >-
+      What kinds of automations is it best suited for? Orchestrating legacy systems?
+      Mission-critical business processes?
+    guidance: Give concrete examples, not abstract categories.
+    shape: list
+    max_items: 10
+    nodes: ["Strengths, limitations, best for"]
+
+  - key: best_for_companies
+    label: Best for (companies)
+    question: >-
+      What kinds of companies will benefit from it most? Enterprises? Startups?
+      Organisations in regulated industries?
+    guidance: Give the reason alongside each company type, in the same point.
+    shape: list
+    max_items: 8
+    nodes: ["Strengths, limitations, best for"]
+
+  - key: best_for_end_users
+    label: Best for (end users)
+    question: >-
+      Who will be most comfortable using it? Business analysts with limited technical
+      skills? Full-stack developers? Business users without tech skills?
+    guidance: Name the persona and say why, referring to the skills the product demands.
+    shape: prose
+    nodes: ["Strengths, limitations, best for"]

@@ -1,0 +1,24 @@
+# Python 3.10+ required (the code uses PEP 604 unions).
+# After installing, fetch the browser: python -m playwright install chromium
+
+# UI
+streamlit>=1.40
+pandas>=2.2
+openpyxl>=3.1
+
+# Scraping
+crawl4ai>=0.9.0          # headless Chromium + markdown extraction
+trafilatura>=2.0         # static fallback when the browser is blocked
+httpx>=0.27
+beautifulsoup4>=4.12
+lxml>=5.0
+
+# LLM providers
+openai>=1.40
+anthropic>=0.40
+
+# Core
+pydantic>=2.8
+PyYAML>=6.0
+jsonschema>=4.20
+python-dotenv>=1.0
