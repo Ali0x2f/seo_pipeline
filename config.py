@@ -37,14 +37,16 @@ def _env_float(key: str, default: float) -> float:
 @dataclass
 class Config:
     # --- LLM ---
-    provider: str = os.getenv("LLM_PROVIDER", "openai")
+    provider: str = os.getenv("LLM_PROVIDER", "deepseek")
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
     deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
-    deepseek_base_url: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
+    deepseek_base_url: str = os.getenv(
+        "DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"
+    )
     ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-    model: str = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    model: str = os.getenv("LLM_MODEL", "deepseek-v4-flash")
     temperature: float = _env_float("LLM_TEMPERATURE", 0.1)
     max_output_tokens: int = _env_int("LLM_MAX_OUTPUT_TOKENS", 8000)
     llm_concurrency: int = _env_int("LLM_CONCURRENCY", 4)

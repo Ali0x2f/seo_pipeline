@@ -52,9 +52,9 @@ The `packages.txt` file installs Chromium's system dependencies automatically.##
 
 | Provider | JSON guarantee | Notes |
 |---|---|---|
-| `openai` | strict `json_schema` — enforced by the API | Most reliable. `gpt-4o-mini` is the default. |
+| `openai` | strict `json_schema` — enforced by the API | Most reliable. |
 | `anthropic` | forced tool call | Equally reliable; schema is the tool's input schema. |
-| `deepseek` | loose `json_object` + local validation | Cheap and capable. Use `deepseek-v4-flash`. |
+| `deepseek` | loose `json_object` + local validation | **Default.** Use `deepseek-v4-flash`. |
 | `ollama` | loose `json_object` + local validation | Local and free. Weakest on a 17-field schema. |
 
 Each provider remembers its own key, endpoint and model, so switching between them never
