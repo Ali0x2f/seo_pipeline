@@ -20,9 +20,14 @@ import streamlit as st
 # Dockerfile build step to pre-install Chromium.  We detect missing browsers
 # at startup and install them once, caching the result so it survives reruns.
 
-# Prefer a user-specified path, fall back to a writable temp location.
-# /opt is root-only on most cloud platforms — don't default there.
+# Prefer a user-specified path, but verify it's writable first.
+# /opt is root-only on most cloud platforms — silently fall back.
 _PW_PATH = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+if _PW_PATH:
+    try:
+        os.makedirs(_PW_PATH, exist_ok=True)
+    except OSError:
+        _PW_PATH = ""  # not writable — ignore
 if not _PW_PATH:
     _PW_PATH = os.path.join(os.environ.get("HOME", "/tmp"), ".cache", "ms-playwright")
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = _PW_PATH
