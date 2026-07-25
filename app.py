@@ -15,36 +15,34 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-# ── Playwright browser bootstrap (Streamlit Cloud / fresh deploys) ──
-# On platforms that run the app directly (streamlit.app, etc.) there is no
-# Dockerfile build step to pre-install Chromium.  We detect missing browsers
-# at startup and install them once, caching the result so it survives reruns.
+# ── Playwright browser bootstrap ──────────────────────────────────
+# Chromium is needed for JS-rendered pages (pricing tables, SPAs).
+# On Streamlit Cloud there is no Docker build step, so the user must
+# trigger the install manually from the sidebar.  Once installed it
+# persists across reruns (session state) but not across restarts.
 
-# Prefer a user-specified path, but verify it's writable first.
-# /opt is root-only on most cloud platforms — silently fall back.
 _PW_PATH = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
 if _PW_PATH:
     try:
         os.makedirs(_PW_PATH, exist_ok=True)
     except OSError:
-        _PW_PATH = ""  # not writable — ignore
+        _PW_PATH = ""
 if not _PW_PATH:
     _PW_PATH = os.path.join(os.environ.get("HOME", "/tmp"), ".cache", "ms-playwright")
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = _PW_PATH
 
 
-@st.cache_resource(show_spinner="Installing Chromium browser…")
-def _ensure_playwright_browsers() -> bool:
-    """Install Chromium if missing.  Returns True on success."""
-    try:
-        from playwright.sync_api import sync_playwright
+def _chromium_is_installed() -> bool:
+    """Check whether Chromium is already on disk.  Fast, no subprocess."""
+    return bool(list(Path(_PW_PATH).glob("chromium*/*/chrome*")))
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            browser.close()
-        return True
-    except Exception:
-        pass
+
+def _install_chromium() -> tuple[bool, str]:
+    """Download and install Chromium.  Returns (success, error_message)."""
+    from playwright.sync_api import sync_playwright
+
+    if _chromium_is_installed():
+        return True, ""
 
     try:
         result = subprocess.run(
@@ -54,24 +52,14 @@ def _ensure_playwright_browsers() -> bool:
         )
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip()
-            raise RuntimeError(detail or f"exit code {result.returncode}")
-
-        from playwright.sync_api import sync_playwright
+            return False, detail or f"exit code {result.returncode}"
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            browser.close()
-        return True
+            p.chromium.launch(headless=True).close()
+        return True, ""
     except Exception as e:
-        st.error(
-            f"Failed to install Chromium browser: {e}\n\n"
-            "Scraping pages that require JavaScript will not work. "
-            "Static fallback (httpx + trafilatura) will still be attempted."
-        )
-        return False
+        return False, str(e)
 
-
-_PLAYWRIGHT_READY = _ensure_playwright_browsers()
 
 from config import SCHEMA_DIR, Config
 from jobs import start_job
@@ -114,6 +102,7 @@ def init_state() -> None:
         "job": None,
         "job_stages": (),
         "preflight": None,
+        "chromium_installed": _chromium_is_installed(),
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
@@ -173,6 +162,29 @@ def make_provider(cfg: Config):
 def render_sidebar() -> None:
     ss = st.session_state
     with st.sidebar:
+        # ── Chromium browser ──────────────────────────────────────
+        st.subheader("Browser")
+        if ss.get("chromium_installed"):
+            st.success("Chromium ready", icon="✅")
+        else:
+            st.warning("Chromium not installed", icon="⚠️")
+            st.caption(
+                "Needed for pages that build content with JavaScript "
+                "(pricing tables, SPAs). Without it, a static fallback "
+                "is used which may miss JS-rendered content."
+            )
+            if st.button("Install Chromium (~130 MB)", type="primary", width="stretch"):
+                with st.spinner("Downloading Chromium…"):
+                    ok, err = _install_chromium()
+                if ok:
+                    ss["chromium_installed"] = True
+                    st.rerun()
+                else:
+                    st.error(f"Install failed: {err}")
+
+        st.divider()
+
+        # ── Model ─────────────────────────────────────────────────
         st.subheader("Model")
         provider = st.selectbox(
             "Provider",
