@@ -528,17 +528,23 @@ def tab_schema() -> None:
         c3.success("Schema looks consistent.")
 
     with st.expander("Node → field routing"):
-        rows = []
         for node in spec.all_nodes():
             fs = spec.fields_for_node(node)
-            rows.append(
-                {
-                    "Node": node,
-                    "Fields fed": len(fs),
-                    "Fields": ", ".join(f.key for f in fs) or "(none)",
-                }
+            labels_html = (
+                "".join(
+                    f'<span style="display:inline-block;background:#2d3748;color:#e2e8f0;'
+                    f"border-radius:4px;padding:1px 8px;margin:2px 4px 2px 0;"
+                    f'font-size:0.85em;white-space:nowrap;">{f.label}</span>'
+                    for f in fs
+                )
+                or '<span style="color:#718096;font-style:italic;">(none)</span>'
             )
-        st.dataframe(pd.DataFrame(rows), width=STRETCH, hide_index=True)
+            st.markdown(
+                f'<div style="margin:4px 0;">'
+                f'<span style="font-weight:600;color:#e2e8f0;margin-right:8px;">{node}</span>'
+                f"{labels_html}</div>",
+                unsafe_allow_html=True,
+            )
 
     with st.expander("YAML"):
         yaml_text = spec.to_yaml_text()
