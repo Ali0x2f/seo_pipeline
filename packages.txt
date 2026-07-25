@@ -1,6 +1,3 @@
-# Chromium / Playwright system dependencies for headless browsing.
-# Streamlit Cloud reads this file and apt-get installs each package
-# before running pip install.
 libnss3
 libnspr4
 libatk-bridge2.0-0
