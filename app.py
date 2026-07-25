@@ -871,6 +871,18 @@ def tab_review() -> None:
     b.metric("Merge method", rf.method or "-")
     c.metric("Conflict", "yes" if rf.conflict else "no")
 
+    # Explain *why* a value is empty so the user knows whether it's
+    # a data gap (no sources covered this) or a processing failure.
+    if rf.is_empty:
+        if rf.method == "empty":
+            st.info(
+                "No source page covered this field. The cell is legitimately empty."
+            )
+        elif rf.method == "mechanical" and rf.conflict_note:
+            st.warning(rf.conflict_note)
+        else:
+            st.info("No claims found for this field across any source.")
+
     st.caption("Individual claims behind this value:")
     any_claim = False
     for ext in state.extractions:

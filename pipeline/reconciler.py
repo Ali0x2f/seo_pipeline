@@ -44,7 +44,10 @@ SYSTEM_PROMPT = (
     "best-supported value as the value. Differing levels of detail are NOT a conflict; "
     "only incompatible facts are.\n"
     "5. Introduce nothing that is not present in the claims. You have no other source.\n"
-    "6. Write in neutral, factual English with no marketing language."
+    "6. NEVER use the product name as the value for a field. The product name is just "
+    "the subject — it is never a valid answer to a field's question. If no substantive "
+    "claims exist for a field, return an empty value.\n"
+    "7. Write in neutral, factual English with no marketing language."
 )
 
 
@@ -97,7 +100,7 @@ def _dedupe_points(values: list[str], limit: int) -> list[str]:
             continue
         for i, existing in enumerate(norms):
             if _is_duplicate(n, existing):
-                if len(c) > len(kept[i]):       # keep whichever carries more detail
+                if len(c) > len(kept[i]):  # keep whichever carries more detail
                     kept[i], norms[i] = c, n
                 break
         else:
@@ -109,6 +112,7 @@ def _dedupe_points(values: list[str], limit: int) -> list[str]:
 
 
 # --------------------------------------------------------------------------- gather
+
 
 def _collect(
     extractions: list[SourceExtraction], spec: SchemaSpec
@@ -127,6 +131,7 @@ def _collect(
 
 # ---------------------------------------------------------------------- mechanical
 
+
 def _mechanical(
     field: FieldSpec, claims: list[tuple[str, list[str]]], spec: SchemaSpec
 ) -> ReconciledField:
@@ -136,7 +141,9 @@ def _mechanical(
         flat.extend(vals)
 
     rf = ReconciledField(
-        field_key=field.key, sources=sources, source_count=len(claims),
+        field_key=field.key,
+        sources=sources,
+        source_count=len(claims),
         method="single" if len(claims) == 1 else "mechanical",
     )
 
@@ -150,7 +157,9 @@ def _mechanical(
     groups: dict[str, list[str]] = {}
     for v in flat:
         groups.setdefault(_norm(v), []).append(v)
-    ranked = sorted(groups.items(), key=lambda kv: (-len(kv[1]), -len(max(kv[1], key=len))))
+    ranked = sorted(
+        groups.items(), key=lambda kv: (-len(kv[1]), -len(max(kv[1], key=len)))
+    )
     best = max(ranked[0][1], key=len) if ranked else ""
     rf.items = [best] if best else []
     rf.value = best
@@ -162,6 +171,7 @@ def _mechanical(
 
 
 # ----------------------------------------------------------------------- llm merge
+
 
 def _merge_schema(fields: list[FieldSpec]) -> dict:
     props = {}
@@ -178,7 +188,7 @@ def _merge_schema(fields: list[FieldSpec]) -> dict:
                 "conflict_note": {
                     "type": "string",
                     "description": "Explain the contradiction, naming the differing "
-                                   "values. Empty when conflict is false.",
+                    "values. Empty when conflict is false.",
                 },
             },
             "required": ["value", "conflict", "conflict_note"],
@@ -200,7 +210,9 @@ def _merge_schema(fields: list[FieldSpec]) -> dict:
 
 
 def _merge_prompt(
-    spec: SchemaSpec, product: str, batch: list[tuple[FieldSpec, list[tuple[str, list[str]]]]]
+    spec: SchemaSpec,
+    product: str,
+    batch: list[tuple[FieldSpec, list[tuple[str, list[str]]]]],
 ) -> str:
     lines = [f"{spec.entity_label.upper()}: {product}", ""]
     for field, claims in batch:
@@ -238,12 +250,15 @@ def _llm_merge_batch(
     usage: Usage,
 ) -> dict[str, ReconciledField]:
     fields = [f for f, _ in batch]
-    payload_fingerprint = make_key(
-        *[f"{f.key}:{c}" for f, c in batch]
-    )
+    payload_fingerprint = make_key(*[f"{f.key}:{c}" for f, c in batch])
     ck = make_key(
-        "reconcile", RECONCILE_CACHE_VERSION, provider.name, provider.model,
-        cfg.temperature, product, payload_fingerprint,
+        "reconcile",
+        RECONCILE_CACHE_VERSION,
+        provider.name,
+        provider.model,
+        cfg.temperature,
+        product,
+        payload_fingerprint,
     )
 
     data = cache.get(ck)
@@ -256,15 +271,14 @@ def _llm_merge_batch(
                 max_tokens=cfg.max_output_tokens,
                 temperature=cfg.temperature,
             )
-        except Exception as e:                             # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             usage.errors += 1
             # Degrade to mechanical rather than losing the batch entirely.
             out = {f.key: _mechanical(f, claims, spec) for f, claims in batch}
             for rf in out.values():
                 rf.conflict_note = (
-                    (rf.conflict_note + " | " if rf.conflict_note else "")
-                    + f"LLM merge failed ({type(e).__name__}); merged mechanically."
-                )
+                    rf.conflict_note + " | " if rf.conflict_note else ""
+                ) + f"LLM merge failed ({type(e).__name__}); merged mechanically."
             return out
         data = resp.data
         cache.set(ck, data)
@@ -296,18 +310,36 @@ def _llm_merge_batch(
             conflict_note=str(node.get("conflict_note") or "").strip(),
             method="llm",
         )
-        if not rf.items:
-            # The merger dropped everything; fall back so data is never lost silently.
+        # Guard: the LLM sometimes returns the product name as the field
+        # value (e.g. "n8n" for a "Key capabilities" field).  Detect and
+        # fall back to mechanical — the product name is never a valid answer.
+        value_stripped = rf.value.strip().lower()
+        product_stripped = product.strip().lower()
+        if value_stripped == product_stripped or (
+            rf.items
+            and len(rf.items) == 1
+            and rf.items[0].strip().lower() == product_stripped
+        ):
             rf = _mechanical(field, claims, spec)
+            rf.method = "mechanical"
+            note = "LLM returned product name as value; merged mechanically."
             rf.conflict_note = (
-                (rf.conflict_note + " | " if rf.conflict_note else "")
-                + "LLM merge returned nothing; merged mechanically."
+                f"{rf.conflict_note} | {note}" if rf.conflict_note else note
+            )
+
+        if not rf.value and not rf.items:
+            rf = _mechanical(field, claims, spec)
+            rf.method = "mechanical"
+            note = "LLM merge returned nothing; merged mechanically."
+            rf.conflict_note = (
+                f"{rf.conflict_note} | {note}" if rf.conflict_note else note
             )
         out[field.key] = rf
     return out
 
 
 # -------------------------------------------------------------------------- public
+
 
 def reconcile(
     extractions: list[SourceExtraction],
@@ -329,10 +361,12 @@ def reconcile(
         by_field = grouped.get(product, {})
         pr = ProductResult(
             product=product,
-            pages_used=sorted({e.url for e in extractions
-                               if e.product == product and not e.error}),
-            pages_failed=sorted({e.url for e in extractions
-                                 if e.product == product and e.error}),
+            pages_used=sorted(
+                {e.url for e in extractions if e.product == product and not e.error}
+            ),
+            pages_failed=sorted(
+                {e.url for e in extractions if e.product == product and e.error}
+            ),
         )
 
         needs_llm: list[tuple[FieldSpec, list[tuple[str, list[str]]]]] = []
@@ -347,7 +381,9 @@ def reconcile(
 
             claims = by_field.get(field.key, [])
             if not claims:
-                pr.fields[field.key] = ReconciledField(field_key=field.key, method="empty")
+                pr.fields[field.key] = ReconciledField(
+                    field_key=field.key, method="empty"
+                )
             elif len(claims) == 1 or not use_llm or provider is None:
                 pr.fields[field.key] = _mechanical(field, claims, spec)
             else:
@@ -358,7 +394,8 @@ def reconcile(
             batch = needs_llm[start : start + size]
             if progress:
                 progress(
-                    pi, total_steps,
+                    pi,
+                    total_steps,
                     f"{product}: merging {', '.join(f.key for f, _ in batch)}",
                 )
             pr.fields.update(
