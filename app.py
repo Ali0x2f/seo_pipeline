@@ -20,10 +20,12 @@ import streamlit as st
 # Dockerfile build step to pre-install Chromium.  We detect missing browsers
 # at startup and install them once, caching the result so it survives reruns.
 
-_PLAYWRIGHT_BROWSERS_PATH = os.environ.get(
-    "PLAYWRIGHT_BROWSERS_PATH", "/opt/playwright-browsers"
-)
-os.environ["PLAYWRIGHT_BROWSERS_PATH"] = _PLAYWRIGHT_BROWSERS_PATH
+# Prefer a user-specified path, fall back to a writable temp location.
+# /opt is root-only on most cloud platforms — don't default there.
+_PW_PATH = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+if not _PW_PATH:
+    _PW_PATH = os.path.join(os.environ.get("HOME", "/tmp"), ".cache", "ms-playwright")
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = _PW_PATH
 
 
 @st.cache_resource(show_spinner="Installing Chromium browser…")
@@ -32,23 +34,23 @@ def _ensure_playwright_browsers() -> bool:
     try:
         from playwright.sync_api import sync_playwright
 
-        # Quick check: can we launch the browser?
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             browser.close()
         return True
     except Exception:
-        # Browser not found or broken — install it.
         pass
 
     try:
-        subprocess.run(
+        result = subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            capture_output=True,
+            text=True,
         )
-        # Verify the install worked.
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(detail or f"exit code {result.returncode}")
+
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as p:
