@@ -83,7 +83,9 @@ from pipeline.schema import (
 )
 from pipeline.store import delete_run, list_runs, load_run
 
-st.set_page_config(page_title="SEO Content Pipeline", page_icon="📊", layout="wide")
+st.set_page_config(
+    page_title="SEO Content Pipeline | Mike - RINGHEL  ", page_icon="📑", layout="wide"
+)
 
 STRETCH = "stretch"
 

@@ -3,10 +3,31 @@
 Turns a list of reference URLs into a structured comparison dataset — one row per
 product — with every claim traceable back to the page it came from.
 
-```
-URLs + nodes ──► scrape ──► extract (per source) ──► reconcile ──► review ──► export
-                 crawl4ai    claims + quotes         merge, flag     QA        xlsx/csv
-                                                     conflicts
+```mermaid
+flowchart LR
+    A["📄 Input<br/>CSV / Excel / paste"] --> B["🔍 Preflight<br/>cost estimate, coverage gaps"]
+    B --> C{"💾 Cache hit?"}
+    C -- yes --> D["⚡ Skip fetch"]
+    C -- no --> E{"🌐 Static pre-check<br/>httpx + trafilatura"}
+    E -- sufficient --> F["✅ Done"]
+    E -- insufficient --> G["🖥️ Chromium<br/>crawl4ai + Playwright"]
+    G --> H{"Thin content?"}
+    H -- yes --> I["🔄 Static fallback"]
+    H -- no --> F
+    I --> F
+
+    F --> J["🤖 Extract<br/>per-source claims + quotes<br/>one LLM call per URL"]
+    J --> K["✅ Quote verification<br/>check quote against page text"]
+    K --> L["🔗 Reconcile<br/>merge claims across sources<br/>flag conflicts"]
+    L --> M["👁️ Review<br/>conflicts, provenance, coverage"]
+    M --> N["📊 Export<br/>xlsx with 7 sheets"]
+
+    style A fill:#1a1a2e,stroke:#e94560,color:#eee
+    style N fill:#1a1a2e,stroke:#0f3460,color:#eee
+    style C fill:#16213e,stroke:#e94560,color:#eee
+    style E fill:#16213e,stroke:#533483,color:#eee
+    style J fill:#16213e,stroke:#533483,color:#eee
+    style L fill:#16213e,stroke:#533483,color:#eee
 ```
 
 ## Setup
@@ -26,7 +47,26 @@ into the sidebar at runtime.
 ```powershell
 .\.venv\Scripts\streamlit.exe run app.py
 ```
+### Docker
 
+```powershell
+copy .env.example .env          # fill in your API keys
+docker compose up --build
+```
+
+Open `http://localhost:8501`.  Named volumes persist the cache, runs, and exports
+across rebuilds.
+
+### Streamlit Cloud (streamlit.app)
+
+1. Push the repo to GitHub.
+2. On your Streamlit Cloud dashboard, deploy from that repo.
+3. Set secrets (API keys) in the app's settings.
+4. Once the app loads, click **Install Chromium** in the sidebar — the browser is
+   downloaded on demand (~130 MB) and cached across reruns.  Without it, the app
+   falls back to static HTTP extraction (works for most pages, misses JS-only content).
+
+The `packages.txt` file installs Chromium's system dependencies automatically.
 ## Model providers
 
 | Provider | JSON guarantee | Notes |
@@ -101,9 +141,15 @@ are collapsed automatically. See `sample_input.csv`.
 
 **JS rendering is mandatory.** A plain HTTP GET of `n8n.io/pricing` returns navigation
 chrome and zero prices. With headless Chromium plus a settle delay we get the whole table
-(`$20` Starter, `$50` Pro, `$800` Business). Pages that block the browser — one of the
-nine sample URLs times out on an antibot check — fall back to static extraction
-automatically. All nine succeed.
+(`$20` Starter, `$50` Pro, `$800` Business).
+
+**Static pre-check saves time.** Before launching the heavy browser, every URL is
+fetched with a fast HTTP call.  Pages that serve their content server-side (docs, blog
+posts, product pages) skip the browser entirely — only JS-heavy pricing pages and SPAs
+pay the Chromium cost.  On a typical 9-URL batch this cuts ~5 browser launches.
+
+Pages that block the browser fall back to static extraction automatically. All nine
+sample URLs succeed.
 
 **Subject isolation.** Most reference pages for "alternatives" content are "A vs B"
 comparisons, so the dominant accuracy risk is attributing the competitor's traits to your
@@ -165,14 +211,17 @@ schemas/*.yaml          output schemas (the content briefs)
 pipeline/
   schema.py             FieldSpec / SchemaSpec, node resolution, linting
   models.py             pydantic domain models
-  scraper.py            crawl4ai + static fallback, concurrent
-  providers.py          OpenAI / Anthropic / Ollama, schema-validated JSON
+  scraper.py            crawl4ai + static pre-check, concurrent
+  providers.py          OpenAI / Anthropic / DeepSeek / Ollama
   extractor.py          per-source claim extraction with quote verification
   reconciler.py         cross-source merge, conflict detection
   exporter.py           dataframes and the workbook
   runner.py             input parsing, preflight, orchestration
   cache.py / store.py   disk cache, run persistence
 runs/ output/ .cache/   artifacts
+Dockerfile              multi-stage build (python:3.13-slim + Chromium)
+docker-compose.yml      one-command local deployment
+packages.txt            Chromium system deps for Streamlit Cloud
 ```
 
 ## Notes and limits
@@ -183,10 +232,13 @@ runs/ output/ .cache/   artifacts
 - Cost estimates are order-of-magnitude only, from a small hardcoded price table that will
   drift out of date. They ignore prompt-caching discounts, which DeepSeek in particular
   applies aggressively.
-- Scraping is polite (one request at a time per domain, 1s delay, real user agent) but does
-  not consult `robots.txt`. Check that the sites you target permit this.
+- Scraping is polite (one request at a time per domain, 1s delay outside the domain lock)
+  but does not consult `robots.txt`. Check that the sites you target permit this.
 - Page content genuinely varies between fetches on some sites (A/B tests, geo pricing). The
   cache makes a given run reproducible; clearing it may change results.
+- On Streamlit Cloud the Chromium browser is not pre-installed — click the **Install
+  Chromium** button in the sidebar when first deploying.  The install persists across
+  reruns but may need repeating after an idle shutdown.
 
 ## Second stage (not built)
 
