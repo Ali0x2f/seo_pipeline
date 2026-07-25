@@ -5,12 +5,12 @@ product — with every claim traceable back to the page it came from.
 
 ```mermaid
 flowchart LR
-    A[📄 Input] --> B[🔍 Preflight]
-    B --> C[🌐 Scrape]
-    C --> D[🤖 Extract]
-    D --> E[🔗 Reconcile]
-    E --> F[👁️ Review]
-    F --> G[📊 Export]
+    A["📄 <b>Input</b><br/>CSV / paste URLs + nodes"] --> B["🔍 <b>Preflight</b><br/>estimate cost & coverage"]
+    B --> C["🌐 <b>Scrape</b><br/>static pre-check → Chromium if needed"]
+    C --> D["🤖 <b>Extract</b><br/>LLM finds claims + verbatim quotes"]
+    D --> E["🔗 <b>Reconcile</b><br/>merge claims, flag conflicts"]
+    E --> F["👁️ <b>Review</b><br/>trace provenance, inspect gaps"]
+    F --> G["📊 <b>Export</b><br/>7-sheet Excel workbook"]
 ```
 
 ## Setup
