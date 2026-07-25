@@ -541,20 +541,23 @@ def tab_schema() -> None:
         st.dataframe(pd.DataFrame(rows), width=STRETCH, hide_index=True)
 
     with st.expander("YAML"):
-        text = st.text_area(
-            "Schema YAML", value=spec.to_yaml_text(), height=320, key="spec_yaml"
-        )
-        cc1, cc2 = st.columns(2)
-        if cc1.button("Apply YAML", width=STRETCH, key="schema_apply_yaml"):
-            try:
-                st.session_state.spec = SchemaSpec.from_yaml_text(text)
-                st.success("Applied.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Invalid YAML: {e}")
-        cc2.download_button(
+        yaml_text = spec.to_yaml_text()
+        st.code(yaml_text, language="yaml", line_numbers=True)
+
+        with st.popover("✏️ Edit YAML"):
+            text = st.text_area(
+                "Schema YAML", value=yaml_text, height=320, key="spec_yaml"
+            )
+            if st.button("Apply YAML", width=STRETCH, key="schema_apply_yaml"):
+                try:
+                    st.session_state.spec = SchemaSpec.from_yaml_text(text)
+                    st.success("Applied.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Invalid YAML: {e}")
+        st.download_button(
             "Download YAML",
-            data=spec.to_yaml_text(),
+            data=yaml_text,
             file_name=f"{spec.name}.yaml",
             width=STRETCH,
             key="schema_dl_yaml",
