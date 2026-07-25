@@ -6,11 +6,65 @@ row per product, review provenance, export.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+
+# ── Playwright browser bootstrap (Streamlit Cloud / fresh deploys) ──
+# On platforms that run the app directly (streamlit.app, etc.) there is no
+# Dockerfile build step to pre-install Chromium.  We detect missing browsers
+# at startup and install them once, caching the result so it survives reruns.
+
+_PLAYWRIGHT_BROWSERS_PATH = os.environ.get(
+    "PLAYWRIGHT_BROWSERS_PATH", "/opt/playwright-browsers"
+)
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = _PLAYWRIGHT_BROWSERS_PATH
+
+
+@st.cache_resource(show_spinner="Installing Chromium browser…")
+def _ensure_playwright_browsers() -> bool:
+    """Install Chromium if missing.  Returns True on success."""
+    try:
+        from playwright.sync_api import sync_playwright
+
+        # Quick check: can we launch the browser?
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            browser.close()
+        return True
+    except Exception:
+        # Browser not found or broken — install it.
+        pass
+
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        # Verify the install worked.
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            browser.close()
+        return True
+    except Exception as e:
+        st.error(
+            f"Failed to install Chromium browser: {e}\n\n"
+            "Scraping pages that require JavaScript will not work. "
+            "Static fallback (httpx + trafilatura) will still be attempted."
+        )
+        return False
+
+
+_PLAYWRIGHT_READY = _ensure_playwright_browsers()
 
 from config import SCHEMA_DIR, Config
 from jobs import start_job

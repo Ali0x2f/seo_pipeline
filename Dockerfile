@@ -43,10 +43,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
+# Playwright installs browsers per-user by default ($HOME/.cache/ms-playwright).
+# Running `playwright install` as root puts Chromium under /root/, but the app
+# runs as a non-root user who can't see it.  Force a shared location instead.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+
 # Install Chromium browser that Playwright / crawl4ai will use.
 # --with-deps pulls in any remaining system libs and verifies the
 # browser actually works inside the container.
-RUN python -m playwright install chromium --with-deps
+RUN mkdir -p "$PLAYWRIGHT_BROWSERS_PATH" \
+    && python -m playwright install chromium --with-deps
 
 # ── Application ──────────────────────────────────────────────────
 COPY . .
@@ -71,9 +77,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 
 # Run as non-root for safety.  1000:1000 is the typical first user.
 # Files copied by COPY (above) are root-owned by default, so we chown
-# everything to the app user including the artifact directories.
+# everything to the app user — including the shared Playwright browser
+# cache so the browser can write lock files at runtime.
 RUN useradd -m -u 1000 appuser \
-    && chown -R appuser:appuser /app
+    && chown -R appuser:appuser /app "$PLAYWRIGHT_BROWSERS_PATH"
 USER appuser
 
 # Streamlit has no built-in auth.  If this container is reachable from
