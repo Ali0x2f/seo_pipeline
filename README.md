@@ -5,29 +5,13 @@ product — with every claim traceable back to the page it came from.
 
 ```mermaid
 flowchart LR
-    A["📄 Input<br/>CSV / Excel / paste"] --> B["🔍 Preflight<br/>cost estimate, coverage gaps"]
-    B --> C{"💾 Cache hit?"}
-    C -- yes --> D["⚡ Skip fetch"]
-    C -- no --> E{"🌐 Static pre-check<br/>httpx + trafilatura"}
-    E -- sufficient --> F["✅ Done"]
-    E -- insufficient --> G["🖥️ Chromium<br/>crawl4ai + Playwright"]
-    G --> H{"Thin content?"}
-    H -- yes --> I["🔄 Static fallback"]
-    H -- no --> F
-    I --> F
-
-    F --> J["🤖 Extract<br/>per-source claims + quotes<br/>one LLM call per URL"]
-    J --> K["✅ Quote verification<br/>check quote against page text"]
-    K --> L["🔗 Reconcile<br/>merge claims across sources<br/>flag conflicts"]
-    L --> M["👁️ Review<br/>conflicts, provenance, coverage"]
-    M --> N["📊 Export<br/>xlsx with 7 sheets"]
-
-    style A fill:#1a1a2e,stroke:#e94560,color:#eee
-    style N fill:#1a1a2e,stroke:#0f3460,color:#eee
-    style C fill:#16213e,stroke:#e94560,color:#eee
-    style E fill:#16213e,stroke:#533483,color:#eee
-    style J fill:#16213e,stroke:#533483,color:#eee
-    style L fill:#16213e,stroke:#533483,color:#eee
+    A[📄 Input] --> B[🔍 Preflight]
+    B --> C[🌐 Scrape]
+    C --> D[🤖 Extract]
+    D --> E[🔗 Reconcile]
+    E --> F[👁️ Review]
+    F --> G[📊 Export]
+```
 ```
 
 ## Setup

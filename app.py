@@ -997,6 +997,75 @@ def tab_runs() -> None:
         st.rerun()
 
 
+# ------------------------------------------------------------------------- help tab
+
+
+def tab_help() -> None:
+    st.subheader("How this app works")
+
+    st.markdown("""
+        This tool turns reference URLs into a **structured comparison dataset** —
+        one row per product, with every claim traceable back to the page it came from.
+
+        ### The pipeline (5 stages)
+
+        **1. Scrape** — Fetch every URL.  A fast static HTTP check runs first; most
+        pages (docs, blog posts) skip the heavy Chromium browser.  Only JS-rendered
+        pages (pricing tables, SPAs) launch headless Chrome.
+
+        **2. Extract** — Each scraped page goes to the LLM with a prompt listing the
+        schema fields for that page's node.  The model returns found/not-found for every
+        field, plus a verbatim supporting quote.  Quotes are checked against the page
+        text — unverifiable ones are flagged as possible inventions.
+
+        **3. Reconcile** — Claims from multiple sources about the same field are merged
+        into one value.  The LLM consolidates duplicates, preserves distinct points, and
+        flags genuine contradictions (e.g. two different starting prices).  A mechanical
+        fallback catches cases where the LLM returns nothing.
+
+        **4. Review** — Inspect conflicts, trace any cell back to its source URLs and
+        individual claims, and check coverage (which fields are empty, which rely on a
+        single source).
+
+        **5. Export** — Download a 7-sheet Excel workbook: Dataset, Transposed,
+        QA coverage, Provenance, Claims, Pages, and the Schema brief.
+
+        ### Tabs
+
+        | Tab | What you do |
+        |---|---|
+        | **Schema** | Edit the content brief — add/remove fields, change questions, assign nodes.  Saved as YAML. |
+        | **Input** | Paste a CSV or upload a file.  One row per URL with Product, Node, and URL columns. |
+        | **Run** | Choose stages, see the preflight (cost + coverage), and start the pipeline. |
+        | **Review** | Inspect conflicts, trace provenance, check coverage. |
+        | **Export** | Download the workbook. |
+        | **Saved runs** | Reopen past runs — every stage is persisted to disk. |
+
+        ### Sidebar
+
+        - **Browser** — Install Chromium if missing (only needed on first deploy or
+          after an idle shutdown on Streamlit Cloud).
+        - **Model** — Pick your LLM provider and model.  Each provider remembers its
+          own API key, endpoint, and model, so switching is safe.
+        - **Parameters** — Temperature, token budget, concurrency, cache toggle.
+
+        ### Tips
+
+        - **Tune prompts before spending.**  Change a field's question or guidance in the
+          Schema tab, re-run extraction only, and the cache ensures only changed fields
+          re-run.
+        - **Review conflicts first.**  Fields marked `[CONFLICT]` are where errors
+          concentrate — two sources gave incompatible facts.
+        - **Single-source fields are unverified.**  If only one page covered a field,
+          there is no cross-check.  Verify those cells manually.
+        - **The cache is your friend.**  Re-running an unchanged pipeline costs nothing
+          (no API calls, no fetches).  Clear it if page content has changed.
+        - **Static fallback is automatic.**  Even if Chromium isn't installed, most
+          pages still work via plain HTTP extraction — only JS-heavy pricing tables
+          need the browser.
+        """)
+
+
 # ----------------------------------------------------------------------------- main
 
 
@@ -1010,8 +1079,8 @@ def main() -> None:
         "traceable to the page it came from."
     )
 
-    t1, t2, t3, t4, t5, t6 = st.tabs(
-        ["Schema", "Input", "Run", "Review", "Export", "Saved runs"]
+    t1, t2, t3, t4, t5, t6, t7 = st.tabs(
+        ["Schema", "Input", "Run", "Review", "Export", "Saved runs", "Help"]
     )
     with t1:
         tab_schema()
@@ -1025,6 +1094,8 @@ def main() -> None:
         tab_export()
     with t6:
         tab_runs()
+    with t7:
+        tab_help()
 
 
 if __name__ == "__main__":
