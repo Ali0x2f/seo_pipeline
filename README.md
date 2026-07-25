@@ -33,7 +33,7 @@ into the sidebar at runtime.
 |---|---|---|
 | `openai` | strict `json_schema` — enforced by the API | Most reliable. `gpt-4o-mini` is the default. |
 | `anthropic` | forced tool call | Equally reliable; schema is the tool's input schema. |
-| `deepseek` | loose `json_object` + local validation | Cheap and capable. Use `deepseek-chat`. |
+| `deepseek` | loose `json_object` + local validation | Cheap and capable. Use `deepseek-v4-flash`. |
 | `ollama` | loose `json_object` + local validation | Local and free. Weakest on a 17-field schema. |
 
 Each provider remembers its own key, endpoint and model, so switching between them never
@@ -49,7 +49,7 @@ otherwise tends to reproduce the same malformed output. Two consequences worth k
   brief (measured: 5.7k chars).
 - `deepseek-reasoner` spends output tokens on hidden reasoning and ignores sampling
   parameters (the code omits them for it). It is slower and no better at filling a wide
-  schema, so `deepseek-chat` is the right default for extraction.
+  schema, so `deepseek-v4-flash` is the right default for extraction.
 
 DeepSeek is not automatically the cheapest option here. Extraction is input-heavy, and at
 roughly $0.28/$0.42 per 1M tokens versus `gpt-4o-mini` at $0.15/$0.60, DeepSeek costs

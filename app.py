@@ -41,6 +41,7 @@ STRETCH = "stretch"
 
 # ----------------------------------------------------------------- session bootstrap
 
+
 def init_state() -> None:
     defaults = {
         "spec": None,
@@ -102,39 +103,45 @@ def build_cfg() -> Config:
 
 
 def make_provider(cfg: Config):
-    return build_provider(
-        cfg.provider, cfg.key_for(), cfg.base_url_for(), cfg.model
-    )
+    return build_provider(cfg.provider, cfg.key_for(), cfg.base_url_for(), cfg.model)
 
 
 # -------------------------------------------------------------------------- sidebar
+
 
 def render_sidebar() -> None:
     ss = st.session_state
     with st.sidebar:
         st.subheader("Model")
         provider = st.selectbox(
-            "Provider", PROVIDERS, key="provider",
+            "Provider",
+            PROVIDERS,
+            key="provider",
             help="OpenAI and Anthropic guarantee schema conformance in the API itself, so "
-                 "they are the most reliable. DeepSeek and Ollama only offer loose JSON "
-                 "mode, so the schema is validated locally and repaired on retry.",
+            "they are the most reliable. DeepSeek and Ollama only offer loose JSON "
+            "mode, so the schema is validated locally and repaired on retry.",
         )
         default_cfg = Config()
         models = SUGGESTED_MODELS.get(provider, [])
         # Per-provider widget keys: a stale "gpt-4o-mini" must not survive a switch to
         # DeepSeek, and each provider should remember its own key and endpoint.
         st.selectbox(
-            f"Model ({provider})", models, key=f"model_{provider}",
+            f"Model ({provider})",
+            models,
+            key=f"model_{provider}",
             accept_new_options=True,
             help="Type a name to use a model not listed here.",
         )
-        ss["model"] = ss.get(f"model_{provider}") or (models[0] if models else default_cfg.model)
+        ss["model"] = ss.get(f"model_{provider}") or (
+            models[0] if models else default_cfg.model
+        )
 
         env_keys = {
             "openai": default_cfg.openai_api_key,
             "anthropic": default_cfg.anthropic_api_key,
             "deepseek": default_cfg.deepseek_api_key,
         }
+
         # Streamlit discards state for widgets it did not render this run, so a typed key
         # would vanish when the user switches provider and back. Mirror entered values
         # into plain session slots and seed the widgets from them.
@@ -146,8 +153,13 @@ def render_sidebar() -> None:
             return ss.get(wkey, "")
 
         if provider in env_keys:
-            sticky("API key", "api_key", "", type="password",
-                   placeholder="set in .env, or paste here")
+            sticky(
+                "API key",
+                "api_key",
+                "",
+                type="password",
+                placeholder="set in .env, or paste here",
+            )
             if env_keys[provider] and not ss.get(f"api_key_{provider}"):
                 st.caption("Using key from .env")
 
@@ -164,7 +176,7 @@ def render_sidebar() -> None:
                 st.warning(
                     "deepseek-reasoner spends output tokens on hidden reasoning and "
                     "ignores temperature. It is slower and no better at filling a wide "
-                    "schema. Prefer deepseek-chat for extraction."
+                    "schema. Prefer deepseek-v4-flash for extraction."
                 )
             else:
                 st.caption(
@@ -184,28 +196,53 @@ def render_sidebar() -> None:
 
         with st.expander("Extraction settings"):
             st.slider("Temperature", 0.0, 1.0, 0.1, 0.05, key="temperature")
-            st.number_input("Max output tokens", 1000, 32000, 8000, 1000,
-                            key="max_output_tokens",
-                            help="Too low truncates the JSON and the call fails.")
+            st.number_input(
+                "Max output tokens",
+                1000,
+                32000,
+                8000,
+                1000,
+                key="max_output_tokens",
+                help="Too low truncates the JSON and the call fails.",
+            )
             st.number_input("LLM concurrency", 1, 16, 4, 1, key="llm_concurrency")
             st.number_input(
-                "Merge batch size", 1, 20, 6, 1, key="reconcile_batch_size",
+                "Merge batch size",
+                1,
+                20,
+                6,
+                1,
+                key="reconcile_batch_size",
                 help="Fields merged per call. Larger is cheaper but risks truncation.",
             )
 
         with st.expander("Scraping settings"):
-            st.number_input("Browser concurrency", 1, 12, 4, 1, key="scrape_concurrency")
-            st.number_input("Max chars per page", 5000, 200000, 40000, 5000,
-                            key="max_scrape_chars")
+            st.number_input(
+                "Browser concurrency", 1, 12, 4, 1, key="scrape_concurrency"
+            )
+            st.number_input(
+                "Max chars per page", 5000, 200000, 40000, 5000, key="max_scrape_chars"
+            )
             st.number_input("Page timeout (s)", 10, 180, 60, 10, key="page_timeout_s")
-            st.number_input("Settle delay (s)", 0.0, 10.0, 2.5, 0.5, key="settle_delay_s",
-                            help="Extra wait after load. Client-rendered pricing tables "
-                                 "need this.")
+            st.number_input(
+                "Settle delay (s)",
+                0.0,
+                10.0,
+                2.5,
+                0.5,
+                key="settle_delay_s",
+                help="Extra wait after load. Client-rendered pricing tables "
+                "need this.",
+            )
 
         with st.expander("Cache"):
-            st.checkbox("Use cache", value=True, key="use_cache",
-                        help="Reuses fetched pages and previous LLM answers. Keys include "
-                             "the model and prompts, so edits correctly miss the cache.")
+            st.checkbox(
+                "Use cache",
+                value=True,
+                key="use_cache",
+                help="Reuses fetched pages and previous LLM answers. Keys include "
+                "the model and prompts, so edits correctly miss the cache.",
+            )
             n, nbytes = cache_mod.total_size()
             st.caption(f"{n} entries · {nbytes / 1e6:.1f} MB")
             if st.button("Clear cache", width=STRETCH, key="sb_clear_cache"):
@@ -258,8 +295,11 @@ def df_to_fields(df: pd.DataFrame) -> tuple[list[FieldSpec], list[str]]:
                     label=str(r.get("label") or key).strip(),
                     question=str(r.get("question") or "").strip(),
                     shape=FieldShape(str(r.get("shape") or "prose").strip()),
-                    nodes=[n.strip() for n in str(r.get("nodes") or "").split(NODE_SEP)
-                           if n.strip()],
+                    nodes=[
+                        n.strip()
+                        for n in str(r.get("nodes") or "").split(NODE_SEP)
+                        if n.strip()
+                    ],
                     max_items=int(r.get("max_items") or 10),
                     guidance=str(r.get("guidance") or "").strip(),
                     fill_from=FillFrom(str(r.get("source") or "extract").strip()),
@@ -283,9 +323,13 @@ def tab_schema() -> None:
     col1, col2 = st.columns([2, 1])
     with col1:
         picked = st.selectbox(
-            "Saved schemas", names or ["(none)"],
-            index=names.index(st.session_state.spec_source)
-            if st.session_state.spec_source in names else 0,
+            "Saved schemas",
+            names or ["(none)"],
+            index=(
+                names.index(st.session_state.spec_source)
+                if st.session_state.spec_source in names
+                else 0
+            ),
         )
     with col2:
         st.write("")
@@ -302,17 +346,26 @@ def tab_schema() -> None:
 
     a, b, c = st.columns(3)
     a.text_input("Schema name", value=spec.name, key="spec_name")
-    b.text_input("Entity label", value=spec.entity_label, key="spec_entity",
-                 help="What one row represents. 'Product' here.")
+    b.text_input(
+        "Entity label",
+        value=spec.entity_label,
+        key="spec_entity",
+        help="What one row represents. 'Product' here.",
+    )
     c.selectbox(
-        "List rendering", [o.value for o in ListOutput],
+        "List rendering",
+        [o.value for o in ListOutput],
         index=[o.value for o in ListOutput].index(spec.list_output.value),
-        key="spec_listout", help="How list fields are written into a cell.",
+        key="spec_listout",
+        help="How list fields are written into a cell.",
     )
     st.text_area(
-        "Nodes (one per line)", value="\n".join(spec.nodes), key="spec_nodes", height=90,
+        "Nodes (one per line)",
+        value="\n".join(spec.nodes),
+        key="spec_nodes",
+        height=90,
         help="The Node values your input sheet uses, exactly as spelled there. One per "
-             "line, because node names often contain commas.",
+        "line, because node names often contain commas.",
     )
 
     st.markdown("**Fields**")
@@ -323,25 +376,39 @@ def tab_schema() -> None:
         key="field_editor",
         column_config={
             "key": st.column_config.TextColumn(
-                "key", help="snake_case identifier. Changing it invalidates cached "
-                            "extractions for the field.", width="small"),
-            "label": st.column_config.TextColumn("label", help="Exact spreadsheet header."),
+                "key",
+                help="snake_case identifier. Changing it invalidates cached "
+                "extractions for the field.",
+                width="small",
+            ),
+            "label": st.column_config.TextColumn(
+                "label", help="Exact spreadsheet header."
+            ),
             "question": st.column_config.TextColumn(
-                "question", help="Defines the field. This text is sent to the model.",
-                width="large"),
+                "question",
+                help="Defines the field. This text is sent to the model.",
+                width="large",
+            ),
             "shape": st.column_config.SelectboxColumn(
-                "shape", options=[s.value for s in FieldShape], width="small"),
+                "shape", options=[s.value for s in FieldShape], width="small"
+            ),
             "nodes": st.column_config.TextColumn(
-                "nodes", help="Separate multiple nodes with a pipe ( | ), since node "
-                              "names often contain commas. Empty means every node may "
-                              "answer this field."),
+                "nodes",
+                help="Separate multiple nodes with a pipe ( | ), since node "
+                "names often contain commas. Empty means every node may "
+                "answer this field.",
+            ),
             "max_items": st.column_config.NumberColumn(
-                "max", min_value=1, max_value=50, width="small"),
+                "max", min_value=1, max_value=50, width="small"
+            ),
             "guidance": st.column_config.TextColumn("guidance", width="large"),
             "source": st.column_config.SelectboxColumn(
-                "source", options=[f.value for f in FillFrom], width="small",
+                "source",
+                options=[f.value for f in FillFrom],
+                width="small",
                 help="'entity' copies the product name from the input sheet instead of "
-                     "spending a call."),
+                "spending a call.",
+            ),
         },
     )
 
@@ -357,8 +424,11 @@ def tab_schema() -> None:
                     name=st.session_state.spec_name.strip() or spec.name,
                     entity_label=st.session_state.spec_entity.strip() or "Product",
                     description=spec.description,
-                    nodes=[n.strip() for n in st.session_state.spec_nodes.splitlines()
-                           if n.strip()],
+                    nodes=[
+                        n.strip()
+                        for n in st.session_state.spec_nodes.splitlines()
+                        if n.strip()
+                    ],
                     list_output=ListOutput(st.session_state.spec_listout),
                     fields=fields,
                 )
@@ -386,16 +456,19 @@ def tab_schema() -> None:
         rows = []
         for node in spec.all_nodes():
             fs = spec.fields_for_node(node)
-            rows.append({
-                "Node": node,
-                "Fields fed": len(fs),
-                "Fields": ", ".join(f.key for f in fs) or "(none)",
-            })
+            rows.append(
+                {
+                    "Node": node,
+                    "Fields fed": len(fs),
+                    "Fields": ", ".join(f.key for f in fs) or "(none)",
+                }
+            )
         st.dataframe(pd.DataFrame(rows), width=STRETCH, hide_index=True)
 
     with st.expander("YAML"):
-        text = st.text_area("Schema YAML", value=spec.to_yaml_text(), height=320,
-                            key="spec_yaml")
+        text = st.text_area(
+            "Schema YAML", value=spec.to_yaml_text(), height=320, key="spec_yaml"
+        )
         cc1, cc2 = st.columns(2)
         if cc1.button("Apply YAML", width=STRETCH, key="schema_apply_yaml"):
             try:
@@ -404,11 +477,17 @@ def tab_schema() -> None:
                 st.rerun()
             except Exception as e:
                 st.error(f"Invalid YAML: {e}")
-        cc2.download_button("Download YAML", data=spec.to_yaml_text(),
-                            file_name=f"{spec.name}.yaml", width=STRETCH, key="schema_dl_yaml")
+        cc2.download_button(
+            "Download YAML",
+            data=spec.to_yaml_text(),
+            file_name=f"{spec.name}.yaml",
+            width=STRETCH,
+            key="schema_dl_yaml",
+        )
 
 
 # ----------------------------------------------------------------------- input tab
+
 
 def tab_input() -> None:
     st.subheader("Reference URLs")
@@ -418,24 +497,34 @@ def tab_input() -> None:
     )
 
     spec = current_spec()
-    src = st.radio("Source", ["Upload file", "Paste table"], horizontal=True,
-                   label_visibility="collapsed", key="input_source")
+    src = st.radio(
+        "Source",
+        ["Upload file", "Paste table"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="input_source",
+    )
 
     default_product = st.text_input(
-        "Default product name", key="input_default_product",
+        "Default product name",
+        key="input_default_product",
         help="Used for rows with no Product column. Required if your sheet lacks one.",
     )
 
     data = None
     filename = ""
     if src == "Upload file":
-        up = st.file_uploader("CSV, TSV or Excel", type=["csv", "tsv", "txt", "xlsx", "xls"],
-                              key="input_uploader")
+        up = st.file_uploader(
+            "CSV, TSV or Excel",
+            type=["csv", "tsv", "txt", "xlsx", "xls"],
+            key="input_uploader",
+        )
         if up:
             data, filename = up.read(), up.name
     else:
         pasted = st.text_area(
-            "Paste rows (tab or comma separated, with a header row)", height=200,
+            "Paste rows (tab or comma separated, with a header row)",
+            height=200,
             key="input_paste",
             placeholder="Product\tNode\tURL\nn8n\tPricing\thttps://n8n.io/pricing/",
         )
@@ -492,6 +581,7 @@ def tab_input() -> None:
 
 # ------------------------------------------------------------------------- run tab
 
+
 def render_progress(job) -> None:
     for stage, sp in job.bus.snapshot():
         label = f"**{stage}** {sp.done}/{sp.total or '?'}"
@@ -515,7 +605,9 @@ def tab_run() -> None:
     c3.metric("Extraction calls", pf["est_extract_calls"])
     c4.metric("Merge calls", f"≤{pf['est_reconcile_calls']}")
 
-    est = estimate_cost(cfg.model, pf["est_prompt_tokens"], pf["est_extract_calls"] * 700)
+    est = estimate_cost(
+        cfg.model, pf["est_prompt_tokens"], pf["est_extract_calls"] * 700
+    )
     if est is not None:
         st.caption(
             f"Very rough first-run estimate for {cfg.model}: **${est:.2f}**. Cached "
@@ -523,9 +615,11 @@ def tab_run() -> None:
         )
 
     use_llm_merge = st.toggle(
-        "Merge with the LLM", value=True, key="run_use_llm",
+        "Merge with the LLM",
+        value=True,
+        key="run_use_llm",
         help="On: the model consolidates claims from multiple sources and flags "
-             "contradictions. Off: free mechanical dedupe, no semantic merging.",
+        "contradictions. Off: free mechanical dedupe, no semantic merging.",
     )
 
     opts = {
@@ -538,7 +632,9 @@ def tab_run() -> None:
 
     prior: RunState | None = st.session_state.run
     if stages != ("scrape", "extract", "reconcile") and prior is None:
-        st.warning("No previous run in this session; the full pipeline will run instead.")
+        st.warning(
+            "No previous run in this session; the full pipeline will run instead."
+        )
         stages = ("scrape", "extract", "reconcile")
 
     job = st.session_state.job
@@ -552,7 +648,10 @@ def tab_run() -> None:
                 return
             st.session_state.job = start_job(
                 run_pipeline,
-                rows=rows, spec=spec, cfg=cfg, provider=provider,
+                rows=rows,
+                spec=spec,
+                cfg=cfg,
+                provider=provider,
                 use_llm_merge=use_llm_merge,
                 state=prior if stages != ("scrape", "extract", "reconcile") else None,
                 stages=stages,
@@ -622,6 +721,7 @@ def tab_run() -> None:
 
 # ---------------------------------------------------------------------- review tab
 
+
 def tab_review() -> None:
     st.subheader("Review")
     state: RunState | None = st.session_state.run
@@ -636,7 +736,8 @@ def tab_review() -> None:
 
     conflicts = [
         (r.product, f.label, r.fields[f.key])
-        for r in state.results for f in spec.fields
+        for r in state.results
+        for f in spec.fields
         if r.fields.get(f.key) and r.fields[f.key].conflict
     ]
     if conflicts:
@@ -647,24 +748,34 @@ def tab_review() -> None:
         for product, label, rf in conflicts:
             with st.expander(f"{product} · {label}"):
                 st.write(rf.conflict_note or "(no note)")
-                st.text_area("Merged value", rf.value, height=100,
-                             key=f"cf_{product}_{label}", disabled=True)
+                st.text_area(
+                    "Merged value",
+                    rf.value,
+                    height=100,
+                    key=f"cf_{product}_{label}",
+                    disabled=True,
+                )
                 st.caption("Sources: " + ", ".join(rf.sources))
 
     st.markdown("**Dataset**")
-    transposed = st.toggle("Transpose (fields as rows)", value=True,
-                           key="review_transpose",
-                           help="Easier to read for wide schemas.")
+    transposed = st.toggle(
+        "Transpose (fields as rows)",
+        value=True,
+        key="review_transpose",
+        help="Easier to read for wide schemas.",
+    )
     ds = (
-        exporter.build_dataset_transposed(state.results, spec) if transposed
+        exporter.build_dataset_transposed(state.results, spec)
+        if transposed
         else exporter.build_dataset(state.results, spec)
     )
     st.dataframe(ds, width=STRETCH, hide_index=True, height=460)
 
     st.markdown("**Trace a field back to its sources**")
     c1, c2 = st.columns(2)
-    product = c1.selectbox("Product", [r.product for r in state.results],
-                           key="review_product")
+    product = c1.selectbox(
+        "Product", [r.product for r in state.results], key="review_product"
+    )
     label_to_key = {f.label: f.key for f in spec.fields}
     label = c2.selectbox("Field", list(label_to_key), key="review_field")
     key = label_to_key[label]
@@ -675,8 +786,13 @@ def tab_review() -> None:
         st.info("Nothing recorded for this field.")
         return
 
-    st.text_area("Merged value", rf.value or "(empty)", height=130, disabled=True,
-                 key="trace_value")
+    st.text_area(
+        "Merged value",
+        rf.value or "(empty)",
+        height=130,
+        disabled=True,
+        key="trace_value",
+    )
     a, b, c = st.columns(3)
     a.metric("Sources", rf.source_count)
     b.metric("Merge method", rf.method or "-")
@@ -708,6 +824,7 @@ def tab_review() -> None:
 
 # ---------------------------------------------------------------------- export tab
 
+
 def tab_export() -> None:
     st.subheader("Export")
     state: RunState | None = st.session_state.run
@@ -725,33 +842,49 @@ def tab_export() -> None:
 
     c1, c2, c3 = st.columns(3)
     c1.download_button(
-        "Dataset CSV", ds.to_csv(index=False).encode("utf-8"),
-        file_name=f"{spec.name}_{stamp}.csv", mime="text/csv", width=STRETCH, key="exp_csv",
+        "Dataset CSV",
+        ds.to_csv(index=False).encode("utf-8"),
+        file_name=f"{spec.name}_{stamp}.csv",
+        mime="text/csv",
+        width=STRETCH,
+        key="exp_csv",
     )
     c2.download_button(
         "Full workbook (xlsx)",
         exporter.build_workbook(state.results, spec, state.extractions, state.pages),
         file_name=f"{spec.name}_{stamp}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        width=STRETCH, key="exp_xlsx",
+        width=STRETCH,
+        key="exp_xlsx",
     )
     c3.download_button(
-        "Run JSON", state.model_dump_json(indent=2).encode("utf-8"),
-        file_name=f"{state.run_id}.json", mime="application/json", width=STRETCH, key="exp_json",
+        "Run JSON",
+        state.model_dump_json(indent=2).encode("utf-8"),
+        file_name=f"{state.run_id}.json",
+        mime="application/json",
+        width=STRETCH,
+        key="exp_json",
     )
 
     st.dataframe(ds, width=STRETCH, hide_index=True)
     with st.expander("Provenance table"):
-        st.dataframe(exporter.build_provenance(state.results, spec), width=STRETCH,
-                     hide_index=True)
+        st.dataframe(
+            exporter.build_provenance(state.results, spec),
+            width=STRETCH,
+            hide_index=True,
+        )
     with st.expander("Claims with quotes"):
-        st.dataframe(exporter.build_claims(state.extractions, spec), width=STRETCH,
-                     hide_index=True)
+        st.dataframe(
+            exporter.build_claims(state.extractions, spec),
+            width=STRETCH,
+            hide_index=True,
+        )
     with st.expander("Fetch log"):
         st.dataframe(exporter.build_pages(state.pages), width=STRETCH, hide_index=True)
 
 
 # ------------------------------------------------------------------------ runs tab
+
 
 def tab_runs() -> None:
     st.subheader("Saved runs")
@@ -778,6 +911,7 @@ def tab_runs() -> None:
 
 
 # ----------------------------------------------------------------------------- main
+
 
 def main() -> None:
     init_state()

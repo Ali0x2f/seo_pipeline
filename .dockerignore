@@ -1,0 +1,31 @@
+# ── Python ────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ── Artifacts (regenerated at runtime) ───────────────────────────
+.cache/
+runs/
+output/
+
+# ── Git / IDE ────────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+.vscode/
+.idea/
+
+# ── OS junk ──────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Secrets ──────────────────────────────────────────────────────
+.env
+!.env.example
+
+# ── Docker ───────────────────────────────────────────────────────
+Dockerfile
+.dockerignore
+docker-compose*.yml

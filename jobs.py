@@ -82,14 +82,14 @@ class Job:
 
 
 def start_job(fn: Callable[..., Any], **kwargs) -> Job:
-    """Run `fn(progress=bus.update, **kwargs)` on a daemon thread."""
+    """Run `fn(on_progress=bus.update, **kwargs)` on a daemon thread."""
     bus = ProgressBus()
     result: dict[str, Any] = {}
 
     def target() -> None:
         try:
-            result["value"] = fn(progress=bus.update, **kwargs)
-        except BaseException as e:                       # noqa: BLE001 - reported to UI
+            result["value"] = fn(on_progress=bus.update, **kwargs)
+        except BaseException as e:  # noqa: BLE001 - reported to UI
             result["error"] = f"{type(e).__name__}: {e}"
             result["traceback"] = traceback.format_exc()
         finally:

@@ -1,0 +1,27 @@
+# docker compose up --build
+#
+# Copy .env.example to .env and fill in your API keys first.
+# Then override settings with environment variables or the
+# Streamlit sidebar at runtime.
+
+services:
+  seo-pipeline:
+    build: .
+    container_name: seo-pipeline
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    volumes:
+      # Persist caches, runs and exports so they survive rebuilds.
+      - seo_cache:/app/.cache
+      - seo_runs:/app/runs
+      - seo_output:/app/output
+      # Mount schemas for live editing without rebuilding.
+      - ./schemas:/app/schemas:ro
+    restart: unless-stopped
+
+volumes:
+  seo_cache:
+  seo_runs:
+  seo_output:

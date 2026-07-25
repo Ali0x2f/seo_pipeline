@@ -28,7 +28,7 @@ PROVIDERS = ("openai", "anthropic", "deepseek", "ollama")
 SUGGESTED_MODELS = {
     "openai": ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"],
     "anthropic": ["claude-sonnet-4-5", "claude-opus-4-1", "claude-3-5-haiku-latest"],
-    "deepseek": ["deepseek-chat", "deepseek-reasoner"],
+    "deepseek": ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-reasoner"],
     "ollama": ["llama3.1:8b", "qwen2.5:14b", "mistral-nemo"],
 }
 
@@ -76,12 +76,15 @@ PRICES = {
     "claude-sonnet-4-5": (3.00, 15.00),
     "claude-opus-4-1": (15.00, 75.00),
     "claude-3-5-haiku-latest": (0.80, 4.00),
-    "deepseek-chat": (0.28, 0.42),
+    "deepseek-v4-flash": (0.28, 0.42),
+    "deepseek-v4-pro": (2.50, 10.00),
     "deepseek-reasoner": (0.28, 0.42),
 }
 
 
-def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float | None:
+def estimate_cost(
+    model: str, prompt_tokens: int, completion_tokens: int
+) -> float | None:
     for name, (pin, pout) in PRICES.items():
         if model.startswith(name):
             return prompt_tokens / 1e6 * pin + completion_tokens / 1e6 * pout
@@ -129,13 +132,29 @@ def extract_json_object(text: str) -> dict:
 
 def _is_retryable(exc: Exception) -> bool:
     msg = str(exc).lower()
-    if any(s in msg for s in ("rate limit", "429", "overloaded", "timeout", "timed out",
-                              "connection", "temporarily unavailable", "502", "503", "504",
-                              "internal server error")):
+    if any(
+        s in msg
+        for s in (
+            "rate limit",
+            "429",
+            "overloaded",
+            "timeout",
+            "timed out",
+            "connection",
+            "temporarily unavailable",
+            "502",
+            "503",
+            "504",
+            "internal server error",
+        )
+    ):
         return True
     return type(exc).__name__ in {
-        "RateLimitError", "APIConnectionError", "APITimeoutError",
-        "InternalServerError", "APIStatusError",
+        "RateLimitError",
+        "APIConnectionError",
+        "APITimeoutError",
+        "InternalServerError",
+        "APIStatusError",
     }
 
 
@@ -148,8 +167,9 @@ class BaseProvider(ABC):
         self.model = model
 
     @abstractmethod
-    def _call(self, system: str, user: str, schema: dict,
-              max_tokens: int, temperature: float) -> LLMResponse: ...
+    def _call(
+        self, system: str, user: str, schema: dict, max_tokens: int, temperature: float
+    ) -> LLMResponse: ...
 
     def complete_json(
         self,
@@ -176,9 +196,11 @@ class BaseProvider(ABC):
                     raise LLMError(f"Response failed schema validation: {detail}")
                 resp.attempts = attempt
                 return resp
-            except Exception as e:                     # noqa: BLE001 - classified below
+            except Exception as e:  # noqa: BLE001 - classified below
                 last = e
-                if attempt >= retries or not (_is_retryable(e) or isinstance(e, LLMError)):
+                if attempt >= retries or not (
+                    _is_retryable(e) or isinstance(e, LLMError)
+                ):
                     break
                 # A malformed or invalid response will usually repeat if we resend the
                 # identical prompt, so tell the model what was wrong and ask it to fix
@@ -190,8 +212,10 @@ class BaseProvider(ABC):
                         "Return the corrected JSON object only. It must match the "
                         "required schema exactly, including every required key."
                     )
-                time.sleep(min(2 ** attempt + random.random(), 20))
-        raise LLMError(f"{self.name} failed after {retries} attempt(s): {last}") from last
+                time.sleep(min(2**attempt + random.random(), 20))
+        raise LLMError(
+            f"{self.name} failed after {retries} attempt(s): {last}"
+        ) from last
 
     def smoke_test(self) -> str:
         """Cheap connectivity check for the UI."""
@@ -204,7 +228,10 @@ class BaseProvider(ABC):
         r = self.complete_json(
             "You reply only with JSON.",
             'Reply with {"ok": true}',
-            schema, max_tokens=100, temperature=0, retries=2,
+            schema,
+            max_tokens=100,
+            temperature=0,
+            retries=2,
         )
         return f"{self.name}/{self.model} OK (data={r.data})"
 
@@ -217,13 +244,17 @@ class OpenAIProvider(BaseProvider):
 
         if not self.api_key:
             raise LLMError("OpenAI API key is missing.")
-        return OpenAI(api_key=self.api_key, base_url=self.base_url or None, timeout=180.0)
+        return OpenAI(
+            api_key=self.api_key, base_url=self.base_url or None, timeout=180.0
+        )
 
     def _call(self, system, user, schema, max_tokens, temperature) -> LLMResponse:
         resp = self._client().chat.completions.create(
             model=self.model,
-            messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": user}],
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
             response_format={
                 "type": "json_schema",
                 "json_schema": {"name": "extraction", "strict": True, "schema": schema},
@@ -267,11 +298,13 @@ class AnthropicProvider(BaseProvider):
             temperature=temperature,
             system=system,
             messages=[{"role": "user", "content": user}],
-            tools=[{
-                "name": "emit_extraction",
-                "description": "Return the extracted fields.",
-                "input_schema": schema,
-            }],
+            tools=[
+                {
+                    "name": "emit_extraction",
+                    "description": "Return the extracted fields.",
+                    "input_schema": schema,
+                }
+            ],
             tool_choice={"type": "tool", "name": "emit_extraction"},
         )
         if resp.stop_reason == "max_tokens":
@@ -369,12 +402,12 @@ class DeepSeekProvider(JsonModeProvider):
     conformance relies on the validate-and-repair loop in `complete_json`.
 
     `deepseek-reasoner` is a reasoning model: it burns output tokens on hidden thinking and
-    ignores sampling parameters, so those are omitted for it. `deepseek-chat` is the
+    ignores sampling parameters, so those are omitted for it. `deepseek-v4-flash` is the
     sensible default for extraction.
     """
 
     name = "deepseek"
-    timeout = 600.0          # long pages plus reasoning traces are slow
+    timeout = 600.0  # long pages plus reasoning traces are slow
 
     @property
     def is_reasoner(self) -> bool:
@@ -399,14 +432,18 @@ DEFAULT_BASE_URLS = {
 }
 
 
-def build_provider(provider: str, api_key: str, base_url: str, model: str) -> BaseProvider:
+def build_provider(
+    provider: str, api_key: str, base_url: str, model: str
+) -> BaseProvider:
     p = (provider or "openai").lower()
     if p == "openai":
         return OpenAIProvider(api_key, base_url or DEFAULT_BASE_URLS["openai"], model)
     if p == "anthropic":
         return AnthropicProvider(api_key, "", model)
     if p == "deepseek":
-        return DeepSeekProvider(api_key, base_url or DEFAULT_BASE_URLS["deepseek"], model)
+        return DeepSeekProvider(
+            api_key, base_url or DEFAULT_BASE_URLS["deepseek"], model
+        )
     if p == "ollama":
         return OllamaProvider("ollama", base_url or DEFAULT_BASE_URLS["ollama"], model)
     raise LLMError(f"Unknown provider {provider!r}. Expected one of {PROVIDERS}.")
