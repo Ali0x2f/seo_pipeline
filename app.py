@@ -864,7 +864,7 @@ def tab_review() -> None:
         rf.value or "(empty)",
         height=130,
         disabled=True,
-        key="trace_value",
+        key=f"trace_value_{product}_{key}",
     )
     a, b, c = st.columns(3)
     a.metric("Sources", rf.source_count)
