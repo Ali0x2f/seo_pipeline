@@ -1073,10 +1073,10 @@ def main() -> None:
     init_state()
     render_sidebar()
 
-    st.title("SEO Content Pipeline")
+    st.title("SEO Content Pipeline | Mike - RINGHEL")
     st.caption(
         "Reference URLs in, a structured comparison dataset out — with every claim "
-        "traceable to the page it came from."
+        "traceable to the page it came from.  Built by Ali."
     )
 
     t1, t2, t3, t4, t5, t6, t7 = st.tabs(
