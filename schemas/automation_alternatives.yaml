@@ -19,6 +19,9 @@ fields:
   - key: alternative_name
     label: Alternative name
     question: The canonical product name.
+    guidance: >-
+      Use the product name as it appears on the page, or in the page's title tag. If
+      there is no clear product name, use the company name instead.
     shape: short_text
     fill_from: entity
 
