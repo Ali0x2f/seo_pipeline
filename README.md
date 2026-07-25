@@ -12,7 +12,6 @@ flowchart LR
     E --> F[👁️ Review]
     F --> G[📊 Export]
 ```
-```
 
 ## Setup
 
@@ -30,8 +29,7 @@ into the sidebar at runtime.
 
 ```powershell
 .\.venv\Scripts\streamlit.exe run app.py
-```
-### Docker
+```### Docker
 
 ```powershell
 copy .env.example .env          # fill in your API keys
@@ -50,8 +48,7 @@ across rebuilds.
    downloaded on demand (~130 MB) and cached across reruns.  Without it, the app
    falls back to static HTTP extraction (works for most pages, misses JS-only content).
 
-The `packages.txt` file installs Chromium's system dependencies automatically.
-## Model providers
+The `packages.txt` file installs Chromium's system dependencies automatically.## Model providers
 
 | Provider | JSON guarantee | Notes |
 |---|---|---|
@@ -188,7 +185,7 @@ Review single-source and conflicting fields first — that is where errors conce
 ## Layout
 
 ```
-app.py                  Streamlit UI (6 tabs)
+app.py                  Streamlit UI (7 tabs, includes Help)
 jobs.py                 background job + pollable progress bus
 config.py               settings, resolved from .env then sidebar
 schemas/*.yaml          output schemas (the content briefs)
