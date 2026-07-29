@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -80,8 +81,9 @@ from pipeline.schema import (
     ListOutput,
     SchemaSpec,
     list_schemas,
+    load_schema_by_name,
 )
-from pipeline.store import delete_run, list_runs, load_run
+from pipeline.store import delete_run, list_runs, load_run, runs_signature
 
 st.set_page_config(
     page_title="SEO Content Pipeline | Mike - RINGHEL  ", page_icon="📑", layout="wide"
@@ -104,6 +106,8 @@ def init_state() -> None:
         "job": None,
         "job_stages": (),
         "preflight": None,
+        "loaded_run_msg": "",
+        "active_run_id": "",
         "chromium_installed": _chromium_is_installed(),
     }
     for k, v in defaults.items():
@@ -198,8 +202,8 @@ def render_sidebar() -> None:
         )
         default_cfg = Config()
         models = SUGGESTED_MODELS.get(provider, [])
-        # Per-provider widget keys: a stale "gpt-4o-mini" must not survive a switch to
-        # DeepSeek, and each provider should remember its own key and endpoint.
+        # Per-provider widget keys: a stale OpenAI model name must not survive a switch
+        # to DeepSeek, and each provider should remember its own key and endpoint.
         st.selectbox(
             f"Model ({provider})",
             models,
@@ -247,17 +251,23 @@ def render_sidebar() -> None:
             sticky("Base URL", "base_url", default_bases[provider])
 
         if provider == "deepseek":
-            if "reasoner" in (ss.get("model") or ""):
-                st.warning(
-                    "deepseek-reasoner spends output tokens on hidden reasoning and "
-                    "ignores temperature. It is slower and no better at filling a wide "
-                    "schema. Prefer deepseek-v4-flash for extraction."
-                )
-            else:
-                st.caption(
-                    "DeepSeek has no strict-schema mode, so the schema is sent in the "
-                    "prompt and validated locally with an automatic repair retry."
-                )
+            st.caption(
+                "DeepSeek has no strict-schema mode, so the schema is sent in the "
+                "prompt and validated locally with an automatic repair retry. "
+                "deepseek-v4-flash is the sensible default for extraction."
+            )
+        elif provider == "openai":
+            st.caption(
+                "gpt-5.x models reason before answering, so part of the output budget "
+                "goes to hidden thinking and temperature is ignored. Reasoning effort is "
+                "pinned low for extraction; raise 'Max output tokens' if calls truncate."
+            )
+        elif provider == "anthropic":
+            st.caption(
+                "Claude 5 models think by default and reject a custom temperature, so "
+                "spend is steered with a low effort level instead. Part of the output "
+                "budget goes to thinking, so keep 'Max output tokens' generous."
+            )
         elif provider == "ollama":
             st.caption("Local model. Expect weaker results on a 17-field schema.")
 
@@ -769,6 +779,8 @@ def tab_run() -> None:
         state, usages = value
         st.session_state.run = state
         st.session_state.usages = usages
+        # Keep the Saved runs tab pointing at whatever is actually in the session.
+        st.session_state.active_run_id = state.run_id
     render_progress(job)
     st.success("Run complete. See the Review tab.")
 
@@ -982,28 +994,237 @@ def tab_export() -> None:
 # ------------------------------------------------------------------------ runs tab
 
 
+STAGE_LABELS = {
+    "created": "Created",
+    "scraped": "Scraped",
+    "extracted": "Extracted",
+    "reconciled": "Complete",
+    "unreadable": "Unreadable",
+}
+
+
+@st.cache_data(show_spinner=False)
+def _runs_index(_signature: tuple) -> list[dict]:
+    """Cached run index. `_signature` is the cache key, not data (leading underscore
+    keeps Streamlit from hashing it as a value)."""
+    return list_runs()
+
+
+def _fmt_when(iso: str) -> str:
+    """Render a stored ISO timestamp as a short local-ish label."""
+    if not iso:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return iso
+    if dt.tzinfo is not None:
+        dt = dt.astimezone()
+    today = datetime.now().astimezone().date()
+    if dt.date() == today:
+        return f"Today {dt:%H:%M}"
+    if (today - dt.date()).days == 1:
+        return f"Yesterday {dt:%H:%M}"
+    return f"{dt:%d %b %H:%M}"
+
+
+def apply_loaded_run(state: RunState, run_id: str) -> None:
+    """Make a run from disk the active session state.
+
+    A run is only reviewable alongside the schema it was produced with -- the review,
+    export and re-run paths all read field keys from the spec -- so the run's own schema
+    and input rows are restored too, not just the results.
+    """
+    notes: list[str] = []
+    if state.schema_name and state.schema_name != (st.session_state.spec_source or ""):
+        try:
+            st.session_state.spec = load_schema_by_name(state.schema_name)
+            st.session_state.spec_source = state.schema_name
+            notes.append(f"schema `{state.schema_name}` loaded")
+        except FileNotFoundError:
+            notes.append(
+                f"schema `{state.schema_name}` is no longer on disk, so the currently "
+                "loaded schema is used and columns may not line up"
+            )
+
+    st.session_state.run = state
+    st.session_state.rows = list(state.inputs)
+    st.session_state.input_warnings = []
+    st.session_state.usages = {}
+    st.session_state.preflight = None
+    st.session_state.job = None
+    st.session_state.job_stages = ()
+    st.session_state.active_run_id = run_id
+
+    where = "Review" if state.results else "Run"
+    st.session_state.loaded_run_msg = (
+        f"Loaded **{run_id}** — {STAGE_LABELS.get(state.stage, state.stage)}, "
+        f"{len(state.inputs)} URL(s)."
+        + (" " + "; ".join(notes).capitalize() + "." if notes else "")
+        + f" Continue in the **{where}** tab."
+    )
+
+
 def tab_runs() -> None:
     st.subheader("Saved runs")
-    st.caption("Every stage is written to disk, so a refresh never loses work.")
-    runs = list_runs()
-    if not runs:
-        st.info("No saved runs yet.")
-        return
-    st.dataframe(pd.DataFrame(runs), width=STRETCH, hide_index=True)
+    st.caption(
+        "Every stage is written to disk, so a refresh never loses work. Loading a run "
+        "also restores its schema and input sheet, so you can review it or re-run just "
+        "the last stage."
+    )
 
-    ids = [r["run_id"] for r in runs]
-    c1, c2, c3 = st.columns([2, 1, 1])
-    picked = c1.selectbox("Run", ids, label_visibility="collapsed", key="runs_pick")
-    if c2.button("Load", width=STRETCH, key="runs_load"):
-        try:
-            st.session_state.run = load_run(picked)
-            st.session_state.usages = {}
-            st.success(f"Loaded {picked}. See the Review tab.")
-        except Exception as e:
-            st.error(f"Could not load: {e}")
-    if c3.button("Delete", width=STRETCH, key="runs_delete"):
-        delete_run(picked)
-        st.rerun()
+    runs = _runs_index(runs_signature())
+    if not runs:
+        st.info(
+            "No saved runs yet. Start one from the Run tab — each stage is saved as it "
+            "completes."
+        )
+        return
+
+    if st.session_state.get("loaded_run_msg"):
+        st.success(st.session_state.pop("loaded_run_msg"))
+
+    active = st.session_state.get("active_run_id") or ""
+    df = pd.DataFrame(runs)
+    # A plain glyph rather than a checkbox column: the grid already renders Streamlit's
+    # own selection checkbox in the first column, and two checkboxes side by side read as
+    # two competing controls.
+    df.insert(0, "live", ["●" if r["run_id"] == active else "" for r in runs])
+    df["stage_label"] = df["stage"].map(lambda s: STAGE_LABELS.get(s, s))
+    df["when"] = df["updated_at"].where(df["updated_at"] != "", df["created_at"])
+    df["when"] = df["when"].map(_fmt_when)
+    df["fetched"] = [
+        "—" if r["urls"] == 0 else f"{r['pages_ok']}/{r['urls']}" for r in runs
+    ]
+
+    st.caption(
+        f"{len(runs)} run(s), newest first. Tick a row to inspect it; ● marks the run "
+        "loaded in this session."
+    )
+    event = st.dataframe(
+        df,
+        width=STRETCH,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="runs_table",
+        column_order=[
+            "live",
+            "run_id",
+            "when",
+            "stage_label",
+            "schema",
+            "model",
+            "products",
+            "urls",
+            "fetched",
+            "results",
+            "warnings",
+            "size_kb",
+        ],
+        column_config={
+            "live": st.column_config.TextColumn(
+                "", width="small", help="The run currently loaded in this session."
+            ),
+            "run_id": st.column_config.TextColumn("Run", width="medium"),
+            "when": st.column_config.TextColumn("Last saved", width="small"),
+            "stage_label": st.column_config.TextColumn(
+                "Stage",
+                width="small",
+                help="How far the pipeline got. Only 'Complete' runs have a dataset.",
+            ),
+            "schema": st.column_config.TextColumn("Schema", width="small"),
+            "model": st.column_config.TextColumn("Model", width="small"),
+            "products": st.column_config.NumberColumn("Products", width="small"),
+            "urls": st.column_config.NumberColumn("URLs", width="small"),
+            "fetched": st.column_config.TextColumn(
+                "Fetched", width="small", help="Pages fetched successfully / total."
+            ),
+            "results": st.column_config.NumberColumn("Rows", width="small"),
+            "warnings": st.column_config.NumberColumn(
+                "Warn", width="small", help="Failed fetches or extractions."
+            ),
+            "size_kb": st.column_config.NumberColumn(
+                "Size", width="small", format="%.0f kB"
+            ),
+        },
+    )
+
+    # Selecting a row picks a run; otherwise fall back to the loaded one, then the newest.
+    sel = list(event.selection.rows) if event and event.selection else []
+    if sel:
+        row = runs[sel[0]]
+    elif active and any(r["run_id"] == active for r in runs):
+        row = next(r for r in runs if r["run_id"] == active)
+    else:
+        row = runs[0]
+    picked = row["run_id"]
+
+    st.divider()
+
+    if row["broken"]:
+        st.error(
+            f"**{picked}** cannot be read ({row['error']}). It may have been truncated "
+            "by an interrupted save. Delete it to clear it from this list."
+        )
+        if st.button("Delete", key="runs_delete_broken"):
+            delete_run(picked)
+            st.rerun()
+        return
+
+    head, actions = st.columns([3, 2])
+    with head:
+        st.markdown(f"**{picked}**")
+        bits = [
+            STAGE_LABELS.get(row["stage"], row["stage"]),
+            f"{row['urls']} URL(s) over {row['products']} product(s)",
+            f"schema `{row['schema'] or '?'}`",
+            f"{row['provider'] or '?'}/{row['model'] or '?'}",
+        ]
+        st.caption(" · ".join(bits))
+        if picked == active:
+            st.caption("Currently loaded in this session.")
+
+    with actions:
+        a, b = st.columns(2)
+        if a.button(
+            "Reload" if picked == active else "Load",
+            type="primary",
+            width=STRETCH,
+            key="runs_load",
+        ):
+            try:
+                state = load_run(picked)
+            except Exception as e:
+                st.error(f"Could not load: {e}")
+            else:
+                apply_loaded_run(state, picked)
+                # Review and Export render before this tab, so without a rerun they would
+                # keep showing the previous run until the next interaction.
+                st.rerun()
+
+        # Deleting is irreversible, so it sits behind a confirmation rather than firing
+        # on a single stray click next to the Load button.
+        with b.popover("Delete", width=STRETCH):
+            st.markdown(f"Delete **{picked}** from disk?")
+            st.caption("This cannot be undone.")
+            if st.button("Delete permanently", key="runs_delete_confirm"):
+                delete_run(picked)
+                if picked == active:
+                    st.session_state.active_run_id = ""
+                st.rerun()
+
+    if row["stage"] != "reconciled":
+        st.info(
+            f"This run stopped at **{STAGE_LABELS.get(row['stage'], row['stage'])}**, so "
+            "it has no finished dataset. Load it and pick the matching option in the Run "
+            "tab to continue from where it left off."
+        )
+    if row["warnings"]:
+        st.caption(
+            f"{row['warnings']} warning(s) recorded — "
+            f"{row['pages_failed']} page(s) failed to fetch. Details after loading."
+        )
 
 
 # ------------------------------------------------------------------------- help tab

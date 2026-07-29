@@ -26,9 +26,9 @@ from jsonschema import Draft202012Validator
 PROVIDERS = ("openai", "anthropic", "deepseek", "ollama")
 
 SUGGESTED_MODELS = {
-    "openai": ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"],
-    "anthropic": ["claude-sonnet-4-5", "claude-opus-4-1", "claude-3-5-haiku-latest"],
-    "deepseek": ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-reasoner"],
+    "openai": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+    "anthropic": ["claude-sonnet-5", "claude-opus-5", "claude-haiku-4-5"],
+    "deepseek": ["deepseek-v4-flash", "deepseek-v4-pro"],
     "ollama": ["llama3.1:8b", "qwen2.5:14b", "mistral-nemo"],
 }
 
@@ -68,27 +68,38 @@ class Usage:
 # Rough USD per 1M tokens (input, output), for an order-of-magnitude estimate only.
 # These drift constantly -- DeepSeek in particular has repriced several times and applies
 # a large cache-hit discount that is not modelled here. Treat as indicative, not billing.
+# Longest key wins in `estimate_cost`, so prefixes like "gpt-5.6" cannot shadow a more
+# specific tier.
 PRICES = {
-    "gpt-4o-mini": (0.15, 0.60),
-    "gpt-4o": (2.50, 10.00),
-    "gpt-4.1-mini": (0.40, 1.60),
-    "gpt-4.1": (2.00, 8.00),
-    "claude-sonnet-4-5": (3.00, 15.00),
-    "claude-opus-4-1": (15.00, 75.00),
-    "claude-3-5-haiku-latest": (0.80, 4.00),
-    "deepseek-v4-flash": (0.28, 0.42),
-    "deepseek-v4-pro": (2.50, 10.00),
-    "deepseek-reasoner": (0.28, 0.42),
+    # OpenAI (GPT-5.6 generation)
+    "gpt-5.6-sol": (5.00, 30.00),
+    "gpt-5.6-terra": (2.50, 15.00),
+    "gpt-5.6-luna": (1.00, 6.00),
+    # Anthropic (Claude 5 generation)
+    "claude-fable-5": (10.00, 50.00),
+    "claude-opus-5": (5.00, 25.00),
+    "claude-sonnet-5": (3.00, 15.00),
+    "claude-haiku-4-5": (1.00, 5.00),
+    # DeepSeek (V4 generation, cache-miss input pricing)
+    "deepseek-v4-flash": (0.14, 0.28),
+    "deepseek-v4-pro": (0.435, 0.87),
 }
 
 
 def estimate_cost(
     model: str, prompt_tokens: int, completion_tokens: int
 ) -> float | None:
-    for name, (pin, pout) in PRICES.items():
-        if model.startswith(name):
-            return prompt_tokens / 1e6 * pin + completion_tokens / 1e6 * pout
-    return None
+    # Match the most specific known prefix, so "gpt-5.6-terra" is not priced as a
+    # shorter "gpt-5.6" entry that happens to be declared first.
+    best: tuple[float, float] | None = None
+    best_len = -1
+    for name, price in PRICES.items():
+        if model.startswith(name) and len(name) > best_len:
+            best, best_len = price, len(name)
+    if best is None:
+        return None
+    pin, pout = best
+    return prompt_tokens / 1e6 * pin + completion_tokens / 1e6 * pout
 
 
 def extract_json_object(text: str) -> dict:
@@ -237,7 +248,17 @@ class BaseProvider(ABC):
 
 
 class OpenAIProvider(BaseProvider):
+    """OpenAI via Chat Completions with strict structured outputs.
+
+    The current generation (gpt-5.x, o-series) are reasoning models: they reject the
+    deprecated `max_tokens` in favour of `max_completion_tokens`, ignore or reject
+    `temperature`, and spend part of the output budget on hidden reasoning. Extraction is
+    a mechanical read-and-fill task, so reasoning effort is pinned low to keep that
+    budget for the JSON itself.
+    """
+
     name = "openai"
+    REASONING_PREFIXES = ("gpt-5", "o1", "o3", "o4")
 
     def _client(self):
         from openai import OpenAI
@@ -245,8 +266,20 @@ class OpenAIProvider(BaseProvider):
         if not self.api_key:
             raise LLMError("OpenAI API key is missing.")
         return OpenAI(
-            api_key=self.api_key, base_url=self.base_url or None, timeout=180.0
+            api_key=self.api_key, base_url=self.base_url or None, timeout=300.0
         )
+
+    @property
+    def is_reasoning(self) -> bool:
+        return (self.model or "").lower().startswith(self.REASONING_PREFIXES)
+
+    def _budget_kwargs(self, max_tokens: int, temperature: float) -> dict:
+        if self.is_reasoning:
+            return {
+                "max_completion_tokens": max_tokens,
+                "reasoning_effort": "low",
+            }
+        return {"max_tokens": max_tokens, "temperature": temperature}
 
     def _call(self, system, user, schema, max_tokens, temperature) -> LLMResponse:
         resp = self._client().chat.completions.create(
@@ -259,8 +292,7 @@ class OpenAIProvider(BaseProvider):
                 "type": "json_schema",
                 "json_schema": {"name": "extraction", "strict": True, "schema": schema},
             },
-            temperature=temperature,
-            max_tokens=max_tokens,
+            **self._budget_kwargs(max_tokens, temperature),
         )
         choice = resp.choices[0]
         if choice.finish_reason == "length":
@@ -282,20 +314,45 @@ class OpenAIProvider(BaseProvider):
 
 
 class AnthropicProvider(BaseProvider):
+    """Anthropic via a forced tool call, whose input schema guarantees the shape.
+
+    Claude 5 and the late 4.x models reject any non-default `temperature`, `top_p` or
+    `top_k` outright, and think by default -- so sampling is omitted for them and spend is
+    steered with `output_config.effort` instead, kept low because extraction is a
+    read-and-fill task rather than a reasoning one.
+    """
+
     name = "anthropic"
+    # Models that reject non-default sampling parameters and accept `effort`.
+    NO_SAMPLING_PREFIXES = (
+        "claude-fable-5",
+        "claude-mythos",
+        "claude-opus-5",
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-sonnet-5",
+    )
 
     def _client(self):
         import anthropic
 
         if not self.api_key:
             raise LLMError("Anthropic API key is missing.")
-        return anthropic.Anthropic(api_key=self.api_key, timeout=180.0)
+        return anthropic.Anthropic(api_key=self.api_key, timeout=300.0)
+
+    @property
+    def rejects_sampling(self) -> bool:
+        return (self.model or "").lower().startswith(self.NO_SAMPLING_PREFIXES)
+
+    def _sampling_kwargs(self, temperature: float) -> dict:
+        if self.rejects_sampling:
+            return {"output_config": {"effort": "low"}}
+        return {"temperature": temperature}
 
     def _call(self, system, user, schema, max_tokens, temperature) -> LLMResponse:
         resp = self._client().messages.create(
             model=self.model,
             max_tokens=max_tokens,
-            temperature=temperature,
             system=system,
             messages=[{"role": "user", "content": user}],
             tools=[
@@ -306,6 +363,7 @@ class AnthropicProvider(BaseProvider):
                 }
             ],
             tool_choice={"type": "tool", "name": "emit_extraction"},
+            **self._sampling_kwargs(temperature),
         )
         if resp.stop_reason == "max_tokens":
             raise LLMError(
@@ -401,22 +459,23 @@ class DeepSeekProvider(JsonModeProvider):
     Only `json_object` mode is available -- there is no strict `json_schema` support -- so
     conformance relies on the validate-and-repair loop in `complete_json`.
 
-    `deepseek-reasoner` is a reasoning model: it burns output tokens on hidden thinking and
-    ignores sampling parameters, so those are omitted for it. `deepseek-v4-flash` is the
-    sensible default for extraction.
+    V4 models think by default, which silently disables `temperature` and spends part of
+    the output budget on a chain of thought. Extraction is a read-and-fill task, so
+    thinking is turned off explicitly: that keeps the whole budget for the JSON and makes
+    the low temperature actually take effect. `deepseek-v4-flash` is the sensible default.
     """
 
     name = "deepseek"
-    timeout = 600.0  # long pages plus reasoning traces are slow
+    timeout = 600.0  # long pages are slow
 
-    @property
-    def is_reasoner(self) -> bool:
-        return "reasoner" in (self.model or "").lower()
+    def _extra_body(self) -> dict:
+        return {"thinking": {"type": "disabled"}}
 
     def _sampling_kwargs(self, temperature: float | None) -> dict:
-        if self.is_reasoner:
-            return {}
-        return {} if temperature is None else {"temperature": temperature}
+        kw: dict = {"extra_body": self._extra_body()}
+        if temperature is not None:
+            kw["temperature"] = temperature
+        return kw
 
 
 class OllamaProvider(JsonModeProvider):

@@ -50,33 +50,41 @@ across rebuilds.
 
 The `packages.txt` file installs Chromium's system dependencies automatically.## Model providers
 
-| Provider | JSON guarantee | Notes |
+| Provider | JSON guarantee | Suggested models |
 |---|---|---|
-| `openai` | strict `json_schema` — enforced by the API | Most reliable. |
-| `anthropic` | forced tool call | Equally reliable; schema is the tool's input schema. |
-| `deepseek` | loose `json_object` + local validation | **Default.** Use `deepseek-v4-flash`. |
+| `openai` | strict `json_schema` — enforced by the API | `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol` |
+| `anthropic` | forced tool call | `claude-sonnet-5`, `claude-opus-5`, `claude-haiku-4-5` |
+| `deepseek` | loose `json_object` + local validation | **Default.** `deepseek-v4-flash`, `deepseek-v4-pro` |
 | `ollama` | loose `json_object` + local validation | Local and free. Weakest on a 17-field schema. |
 
+Any other model name can be typed into the model box; the lists above are only shortcuts.
 Each provider remembers its own key, endpoint and model, so switching between them never
 sends one provider's credential to another's endpoint.
+
+**Reasoning is the default everywhere now**, and extraction does not benefit from it: the
+task is to read a page and fill in fields, not to work a problem out. Reasoning tokens are
+billed as output and eat into the same budget as the JSON, so each provider is configured
+to spend as little on thinking as its API allows:
+
+- **OpenAI** `gpt-5.x` rejects the deprecated `max_tokens` and ignores `temperature`, so the
+  code sends `max_completion_tokens` with `reasoning_effort="low"`.
+- **Anthropic** Claude 5 models return a 400 for any non-default `temperature`, so sampling
+  is omitted and spend is steered with `output_config.effort="low"` instead.
+- **DeepSeek** V4 thinks by default, which silently voids `temperature`. Thinking is turned
+  off explicitly, which keeps the whole output budget for the JSON.
+
+If calls start failing with truncated JSON, raise **Max output tokens** or lower the merge
+batch size — a reasoning model can consume most of a small budget before it emits any JSON.
 
 **DeepSeek specifics.** The API is OpenAI-compatible (`https://api.deepseek.com/v1`) but
 has no strict-schema mode, so the JSON Schema is embedded in the system prompt and
 validated locally. When a reply fails validation, the error is fed back and the model is
 asked to fix that specific problem, rather than blindly resending the same prompt — which
-otherwise tends to reproduce the same malformed output. Two consequences worth knowing:
+otherwise tends to reproduce the same malformed output. Embedding the schema costs roughly
+1.4k extra prompt tokens per call on this 17-field brief (measured: 5.7k chars).
 
-- Embedding the schema costs roughly 1.4k extra prompt tokens per call on this 17-field
-  brief (measured: 5.7k chars).
-- `deepseek-reasoner` spends output tokens on hidden reasoning and ignores sampling
-  parameters (the code omits them for it). It is slower and no better at filling a wide
-  schema, so `deepseek-v4-flash` is the right default for extraction.
-
-DeepSeek is not automatically the cheapest option here. Extraction is input-heavy, and at
-roughly $0.28/$0.42 per 1M tokens versus `gpt-4o-mini` at $0.15/$0.60, DeepSeek costs
-slightly *more* on this workload. Pick it for quality or data-residency reasons rather than
-on the assumption that it is cheaper, and verify current prices — they change often and the
-built-in table is only indicative.
+Prices change often, so treat the built-in cost table as indicative only and check the
+current rates before committing to a provider on cost grounds.
 
 ## Core idea: the schema is data, not code
 
