@@ -12,10 +12,16 @@ services:
       - "8501:8501"
     env_file:
       - .env
+    environment:
+      # files | db | both. Point DATABASE_URL at a server to share runs between
+      # instances; leave it blank to use the SQLite file in /app/data.
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-files}
+      DATABASE_URL: ${DATABASE_URL:-}
     volumes:
-      # Persist caches, runs and exports so they survive rebuilds.
+      # Persist caches, runs, the run database and exports so they survive rebuilds.
       - seo_cache:/app/.cache
       - seo_runs:/app/runs
+      - seo_data:/app/data
       - seo_output:/app/output
       # Mount schemas for live editing without rebuilding.
       - ./schemas:/app/schemas:ro
@@ -24,4 +30,5 @@ services:
 volumes:
   seo_cache:
   seo_runs:
+  seo_data:
   seo_output:

@@ -15,9 +15,21 @@ SCHEMA_DIR = ROOT / "schemas"
 CACHE_DIR = ROOT / ".cache"
 RUNS_DIR = ROOT / "runs"
 OUTPUT_DIR = ROOT / "output"
+DATA_DIR = ROOT / "data"
 
-for _d in (SCHEMA_DIR, CACHE_DIR, RUNS_DIR, OUTPUT_DIR):
+for _d in (SCHEMA_DIR, CACHE_DIR, RUNS_DIR, OUTPUT_DIR, DATA_DIR):
     _d.mkdir(parents=True, exist_ok=True)
+
+# Where the storage backend choice is remembered between restarts. Kept out of .env so
+# the UI can change it without rewriting a file the user hand-edits.
+STORAGE_SETTINGS_FILE = ROOT / "storage.json"
+
+DEFAULT_SQLITE_PATH = DATA_DIR / "runs.db"
+
+# files | db | both. "both" keeps writing JSON while a database is being trialled.
+STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "files")
+# Any SQLAlchemy URL: sqlite:///…, postgresql+psycopg://user:pw@host/db, mysql+pymysql://…
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 
 def _env_int(key: str, default: int) -> int:

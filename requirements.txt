@@ -23,3 +23,8 @@ pydantic>=2.8
 PyYAML>=6.0
 jsonschema>=4.20
 python-dotenv>=1.0
+
+# Run storage (SQLite works out of the box; add a driver for a shared server)
+SQLAlchemy>=2.0
+# psycopg[binary]>=3.2   # PostgreSQL: postgresql+psycopg://user:pw@host/db
+# PyMySQL>=1.1           # MySQL/MariaDB: mysql+pymysql://user:pw@host/db

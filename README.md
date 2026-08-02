@@ -193,7 +193,7 @@ Review single-source and conflicting fields first — that is where errors conce
 ## Layout
 
 ```
-app.py                  Streamlit UI (7 tabs, includes Help)
+app.py                  Streamlit UI (8 tabs, includes Storage and Help)
 jobs.py                 background job + pollable progress bus
 config.py               settings, resolved from .env then sidebar
 schemas/*.yaml          output schemas (the content briefs)
@@ -206,8 +206,9 @@ pipeline/
   reconciler.py         cross-source merge, conflict detection
   exporter.py           dataframes and the workbook
   runner.py             input parsing, preflight, orchestration
-  cache.py / store.py   disk cache, run persistence
-runs/ output/ .cache/   artifacts
+  cache.py / store.py   disk cache, run persistence + backend routing
+  db.py                 SQL run storage (SQLite / Postgres / MySQL)
+runs/ data/ output/     artifacts (JSON runs, run database, exports)
 Dockerfile              multi-stage build (python:3.13-slim + Chromium)
 docker-compose.yml      one-command local deployment
 packages.txt            Chromium system deps for Streamlit Cloud
@@ -229,8 +230,39 @@ packages.txt            Chromium system deps for Streamlit Cloud
   Chromium** button in the sidebar when first deploying.  The install persists across
   reruns but may need repeating after an idle shutdown.
 
+## Storage
+
+Runs are saved as JSON under `runs/` by default. The **Storage** tab switches this to a
+database — a local SQLite file, or any server SQLAlchemy supports — and can copy existing
+runs either way. `both` writes to files and the database at once, so a database outage
+still cannot lose a run.
+
+Set it without the UI via environment variables:
+
+```bash
+STORAGE_BACKEND=both                                   # files | db | both
+DATABASE_URL=postgresql+psycopg://user:pw@host:5432/seo # blank = data/runs.db
+```
+
+Servers need their driver installed: `psycopg[binary]` for PostgreSQL, `PyMySQL` for
+MySQL (both commented out in `requirements.txt`).
+
+Each run is stored as its exact JSON payload in `runs.payload`, so loading is lossless,
+and also flattened into queryable tables — `run_inputs`, `run_pages`, `run_extractions`,
+`run_claims`, `run_results`, `run_fields`, `run_warnings` — so anything that speaks SQL
+can read the data directly:
+
+```sql
+select product, field_key, value, source_count
+from run_fields
+where run_id = 'run_20260728_225909' and conflict = 1;
+```
+
+The Storage tab also downloads the SQLite file or a JSON dump of every run, and restores
+from either.
+
 ## Second stage (not built)
 
-Sanity/CMS publishing. The reconciled `RunState` in `runs/*.json` is the natural handoff
-point: it holds final values plus full provenance, so a publisher can map fields to a
-Sanity schema and push documents without re-running extraction.
+Sanity/CMS publishing. The reconciled `RunState` — in `runs/*.json` or the `runs` table —
+is the natural handoff point: it holds final values plus full provenance, so a publisher
+can map fields to a Sanity schema and push documents without re-running extraction.

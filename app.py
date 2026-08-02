@@ -6,6 +6,7 @@ row per product, review provenance, export.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -62,7 +63,7 @@ def _install_chromium() -> tuple[bool, str]:
         return False, str(e)
 
 
-from config import SCHEMA_DIR, Config
+from config import RUNS_DIR, SCHEMA_DIR, Config
 from jobs import start_job
 from pipeline import cache as cache_mod
 from pipeline import exporter
@@ -83,7 +84,18 @@ from pipeline.schema import (
     list_schemas,
     load_schema_by_name,
 )
-from pipeline.store import delete_run, list_runs, load_run, runs_signature
+from pipeline.store import (
+    BACKENDS,
+    delete_run,
+    get_db,
+    get_settings,
+    list_runs,
+    load_all_run_files,
+    load_run,
+    runs_signature,
+    save_run_file,
+    set_settings,
+)
 
 st.set_page_config(
     page_title="SEO Content Pipeline | Mike - RINGHEL  ", page_icon="📑", layout="wide"
@@ -1113,6 +1125,7 @@ def tab_runs() -> None:
             "run_id",
             "when",
             "stage_label",
+            "source",
             "schema",
             "model",
             "products",
@@ -1127,6 +1140,9 @@ def tab_runs() -> None:
                 "", width="small", help="The run currently loaded in this session."
             ),
             "run_id": st.column_config.TextColumn("Run", width="medium"),
+            "source": st.column_config.TextColumn(
+                "Where", width="small", help="Which backend this run was read from."
+            ),
             "when": st.column_config.TextColumn("Last saved", width="small"),
             "stage_label": st.column_config.TextColumn(
                 "Stage",
@@ -1227,6 +1243,248 @@ def tab_runs() -> None:
         )
 
 
+# ---------------------------------------------------------------------- storage tab
+
+
+BACKEND_LABELS = {
+    "files": "JSON files only",
+    "db": "Database only",
+    "both": "Both (files + database)",
+}
+
+
+def tab_storage() -> None:
+    from pipeline.db import DEFAULT_SQLITE_PATH_URL, redact, sqlite_path
+
+    st.subheader("Storage")
+    st.caption(
+        "Runs are written as JSON files by default. Point them at a database instead to "
+        "query them with SQL, share them between machines, or survive a container with "
+        "no persistent disk."
+    )
+
+    s = get_settings()
+
+    with st.form("storage_form"):
+        backend = st.radio(
+            "Where runs are saved",
+            BACKENDS,
+            index=BACKENDS.index(s.backend),
+            format_func=lambda b: BACKEND_LABELS[b],
+            horizontal=True,
+            help="'Both' keeps writing JSON while you trial a database — if the database "
+            "is unreachable the run is still safe on disk.",
+        )
+        db_url = st.text_input(
+            "Database URL",
+            value=s.db_url,
+            placeholder=DEFAULT_SQLITE_PATH_URL,
+            help="Any SQLAlchemy URL. Leave blank for the built-in SQLite file. "
+            "PostgreSQL: postgresql+psycopg://user:pw@host:5432/dbname · "
+            "MySQL: mysql+pymysql://user:pw@host:3306/dbname",
+        )
+        saved = st.form_submit_button("Save settings", type="primary")
+
+    if saved:
+        set_settings(backend, db_url)
+        st.success(f"Saved. New runs go to: {BACKEND_LABELS[backend]}.")
+        st.rerun()
+
+    if not s.uses_db:
+        st.info(
+            "Database saving is off. Choose **Database only** or **Both** above, then "
+            "use the migration tools below to copy existing runs across."
+        )
+
+    st.divider()
+
+    # ── connection ───────────────────────────────────────────────
+    st.markdown("**Connection**")
+    url = s.resolved_url()
+    st.code(redact(url), language="text")
+
+    path = sqlite_path(url)
+    if path is not None:
+        st.caption(
+            f"SQLite file: `{path}` — "
+            + (
+                f"{path.stat().st_size / 1_000_000:.1f} MB"
+                if path.exists()
+                else "not created yet"
+            )
+        )
+
+    c1, c2 = st.columns(2)
+    if c1.button("Test connection", width=STRETCH, key="db_test"):
+        ok, msg = _db_check(url)
+        (st.success if ok else st.error)(msg)
+        if not ok and ("No module named" in msg or "Can't load plugin" in msg):
+            st.caption(
+                "The driver for this database is not installed. Install it into the "
+                "same environment — `psycopg[binary]` for PostgreSQL, `PyMySQL` for "
+                "MySQL — then test again."
+            )
+    if c2.button("Refresh stats", width=STRETCH, key="db_stats_btn"):
+        st.session_state["db_stats"] = _db_stats(url)
+
+    stats = st.session_state.get("db_stats")
+    if stats:
+        if "error" in stats:
+            st.error(stats["error"])
+        else:
+            st.dataframe(
+                pd.DataFrame([{"table": k, "rows": v} for k, v in stats.items()]),
+                width=STRETCH,
+                hide_index=True,
+            )
+
+    st.divider()
+
+    # ── migration ────────────────────────────────────────────────
+    st.markdown("**Move runs between backends**")
+    st.caption(
+        "Copying never deletes the source, so it is safe to run twice — existing runs "
+        "are skipped unless you tick overwrite."
+    )
+    overwrite = st.checkbox(
+        "Overwrite runs that already exist at the destination", key="db_overwrite"
+    )
+
+    m1, m2 = st.columns(2)
+    if m1.button("Import JSON files → database", width=STRETCH, key="db_import"):
+        states, errors = load_all_run_files()
+        if not states and not errors:
+            st.info("No JSON runs found in `runs/`.")
+        else:
+            try:
+                report = _get_db().import_states(states, overwrite=overwrite)
+            except Exception as e:  # noqa: BLE001 - shown to the user
+                st.error(f"Import failed: {e}")
+            else:
+                st.success(
+                    f"Imported {report['imported']}, skipped {report['skipped']}, "
+                    f"failed {report['failed']}."
+                )
+                for err in errors + report["errors"]:
+                    st.caption(f"⚠️ {err}")
+                st.cache_data.clear()
+
+    if m2.button("Export database → JSON files", width=STRETCH, key="db_export_files"):
+        try:
+            db = _get_db()
+            written = 0
+            for state in db.export_states():
+                if not overwrite and (RUNS_DIR / f"{state.run_id}.json").exists():
+                    continue
+                save_run_file(state)
+                written += 1
+        except Exception as e:  # noqa: BLE001 - shown to the user
+            st.error(f"Export failed: {e}")
+        else:
+            st.success(f"Wrote {written} run(s) to `runs/`.")
+            st.cache_data.clear()
+
+    st.divider()
+
+    # ── download / restore ───────────────────────────────────────
+    st.markdown("**Backup and restore**")
+    d1, d2 = st.columns(2)
+
+    with d1:
+        if path is not None and path.exists():
+            try:
+                blob = _get_db().file_bytes()
+            except Exception as e:  # noqa: BLE001 - shown to the user
+                st.error(f"Could not read the database file: {e}")
+                blob = None
+            if blob:
+                st.download_button(
+                    "Download SQLite file",
+                    blob,
+                    file_name=path.name,
+                    mime="application/vnd.sqlite3",
+                    width=STRETCH,
+                    key="db_download_file",
+                )
+        else:
+            st.caption("Download of the raw file is only available for SQLite.")
+
+    with d2:
+        if st.button("Prepare JSON dump", width=STRETCH, key="db_dump_prepare"):
+            try:
+                st.session_state["db_dump"] = _get_db().dump_json()
+            except Exception as e:  # noqa: BLE001 - shown to the user
+                st.error(f"Dump failed: {e}")
+        dump = st.session_state.get("db_dump")
+        if dump:
+            st.download_button(
+                "Download JSON dump",
+                dump.encode("utf-8"),
+                file_name=f"runs_dump_{datetime.now():%Y%m%d_%H%M%S}.json",
+                mime="application/json",
+                width=STRETCH,
+                key="db_dump_download",
+            )
+
+    uploaded = st.file_uploader(
+        "Restore from a JSON dump or a single run file",
+        type=["json"],
+        key="db_restore",
+        help="Accepts a dump produced above, or one exported run JSON.",
+    )
+    if uploaded is not None and st.button(
+        "Restore into the current backend", key="db_restore_go"
+    ):
+        try:
+            states = _parse_restore(uploaded.getvalue())
+        except Exception as e:  # noqa: BLE001 - shown to the user
+            st.error(f"Could not read that file: {e}")
+        else:
+            report = {"imported": 0, "skipped": 0, "failed": 0, "errors": []}
+            if s.uses_db:
+                report = _get_db().import_states(states, overwrite=overwrite)
+            if s.uses_files:
+                for state in states:
+                    if overwrite or not (RUNS_DIR / f"{state.run_id}.json").exists():
+                        save_run_file(state)
+            st.success(
+                f"Restored {len(states)} run(s) from the file "
+                f"(database: {report['imported']} imported, {report['skipped']} skipped)."
+            )
+            st.cache_data.clear()
+
+
+def _get_db():
+    """A RunDB for the configured URL even when the backend is set to files only."""
+    from pipeline.db import RunDB
+
+    return get_db() or RunDB(get_settings().resolved_url())
+
+
+@st.cache_data(show_spinner=False, ttl=30)
+def _db_check(url: str) -> tuple[bool, str]:
+    from pipeline.db import RunDB
+
+    return RunDB(url).check()
+
+
+def _db_stats(url: str) -> dict:
+    from pipeline.db import RunDB
+
+    try:
+        return RunDB(url).stats()
+    except Exception as e:  # noqa: BLE001 - rendered as an error row
+        return {"error": str(e)}
+
+
+def _parse_restore(blob: bytes) -> list[RunState]:
+    raw = json.loads(blob.decode("utf-8-sig"))
+    items = raw.get("runs") if isinstance(raw, dict) and "runs" in raw else [raw]
+    if not isinstance(items, list):
+        raise ValueError("Expected a run object or a {'runs': [...]} dump.")
+    return [RunState.model_validate(item) for item in items]
+
+
 # ------------------------------------------------------------------------- help tab
 
 
@@ -1309,8 +1567,8 @@ def main() -> None:
         "traceable to the page it came from.  Built by Ali."
     )
 
-    t1, t2, t3, t4, t5, t6, t7 = st.tabs(
-        ["Schema", "Input", "Run", "Review", "Export", "Saved runs", "Help"]
+    t1, t2, t3, t4, t5, t6, t7, t8 = st.tabs(
+        ["Schema", "Input", "Run", "Review", "Export", "Saved runs", "Storage", "Help"]
     )
     with t1:
         tab_schema()
@@ -1325,6 +1583,8 @@ def main() -> None:
     with t6:
         tab_runs()
     with t7:
+        tab_storage()
+    with t8:
         tab_help()
 
 

@@ -13,6 +13,13 @@ output/*.xlsx
 output/*.csv
 output/*.json
 
+# run database (may hold scraped page text) and backend choice
+data/
+storage.json
+*.db
+*.db-wal
+*.db-shm
+
 # python
 __pycache__/
 *.pyc
