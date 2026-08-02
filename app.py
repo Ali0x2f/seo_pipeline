@@ -1528,6 +1528,29 @@ def tab_help() -> None:
         | **Review** | Inspect conflicts, trace provenance, check coverage. |
         | **Export** | Download the workbook. |
         | **Saved runs** | Reopen past runs — every stage is persisted to disk. |
+        | **Storage** | Choose where runs are saved (JSON files and/or a database), migrate, back up, and restore. |
+
+        ### Storage
+
+        Every run is written as a JSON file under `runs/` by default. The **Storage** tab
+        switches this to a **database** — a local SQLite file (`data/runs.db`) or any
+        server SQLAlchemy supports — and can copy runs between backends.
+
+        - **Backends** — `files`, `db`, or `both`.  `both` writes to JSON and the
+          database at once, so a database outage can never lose a run.
+        - **Databases** — Leave the URL blank for SQLite, or use a SQLAlchemy URL for a
+          shared server: `postgresql+psycopg://user:pw@host:5432/dbname` or
+          `mysql+pymysql://user:pw@host:3306/dbname`.  Servers need their driver
+          installed (`psycopg[binary]`, `PyMySQL`).
+        - **Queryable** — Each run is stored as its exact JSON payload (lossless reload)
+          plus flattened tables — `run_inputs`, `run_pages`, `run_extractions`,
+          `run_claims`, `run_results`, `run_fields`, `run_warnings` — so any SQL client
+          can read the data directly.
+        - **Migrate / back up** — Import existing JSON runs into the database, export
+          them back to files, download the SQLite file, or download a JSON dump of every
+          run and restore from it.  Copying never deletes the source.
+        - **Persistent** — Your choice is remembered in `storage.json`.  In Docker, the
+          `data/` volume keeps the database across rebuilds.
 
         ### Sidebar
 
@@ -1551,6 +1574,8 @@ def tab_help() -> None:
         - **Static fallback is automatic.**  Even if Chromium isn't installed, most
           pages still work via plain HTTP extraction — only JS-heavy pricing tables
           need the browser.
+        - **Back up before you clear runs.**  Use the Storage tab to download the
+          SQLite file or a JSON dump — deleting a run is permanent.
         """)
 
 
