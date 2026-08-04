@@ -42,12 +42,15 @@ def build_dataset(
     return pd.DataFrame(rows, columns=cols)
 
 
-def build_dataset_transposed(results: list[ProductResult], spec: SchemaSpec) -> pd.DataFrame:
+def build_dataset_transposed(
+    results: list[ProductResult], spec: SchemaSpec
+) -> pd.DataFrame:
     """Fields as rows, products as columns. Far easier to read for wide schemas."""
     data: dict[str, list[str]] = {"Field": spec.labels}
     for r in results:
         data[r.product] = [
-            (r.fields.get(f.key).value if r.fields.get(f.key) else "") for f in spec.fields
+            (r.fields.get(f.key).value if r.fields.get(f.key) else "")
+            for f in spec.fields
         ]
     return pd.DataFrame(data)
 
@@ -77,6 +80,7 @@ def build_provenance(results: list[ProductResult], spec: SchemaSpec) -> pd.DataF
             rf = r.fields.get(f.key)
             if rf is None:
                 continue
+            web = rf.web
             rows.append(
                 {
                     "Product": r.product,
@@ -86,15 +90,25 @@ def build_provenance(results: list[ProductResult], spec: SchemaSpec) -> pd.DataF
                     "Merge method": rf.method,
                     "Conflict": "YES" if rf.conflict else "",
                     "Conflict note": rf.conflict_note,
+                    "Web check": (
+                        ""
+                        if web is None
+                        else (
+                            "failed"
+                            if web.error
+                            else "resolved" if web.resolved else "unresolved"
+                        )
+                    ),
+                    "Web verdict": "" if web is None else (web.error or web.reasoning),
+                    "Value before web check": rf.value_before_web,
+                    "Web sources": "" if web is None else "\n".join(web.citations),
                     "Source URLs": "\n".join(rf.sources),
                 }
             )
     return pd.DataFrame(rows)
 
 
-def build_claims(
-    extractions: list[SourceExtraction], spec: SchemaSpec
-) -> pd.DataFrame:
+def build_claims(extractions: list[SourceExtraction], spec: SchemaSpec) -> pd.DataFrame:
     """Every individual claim with its supporting quote, for spot-checking."""
     label = {f.key: f.label for f in spec.fields}
     rows = []
@@ -141,15 +155,18 @@ def build_coverage(results: list[ProductResult], spec: SchemaSpec) -> pd.DataFra
     rows = []
     for r in results:
         empty = [
-            f.label for f in spec.fields
+            f.label
+            for f in spec.fields
             if not r.fields.get(f.key) or r.fields[f.key].is_empty
         ]
         conflicts = [
-            f.label for f in spec.fields
+            f.label
+            for f in spec.fields
             if r.fields.get(f.key) and r.fields[f.key].conflict
         ]
         single = [
-            f.label for f in spec.fields
+            f.label
+            for f in spec.fields
             if r.fields.get(f.key) and r.fields[f.key].source_count == 1
         ]
         rows.append(
@@ -180,7 +197,9 @@ def to_excel(sheets: dict[str, pd.DataFrame]) -> bytes:
             ws = writer.sheets[safe]
             for i, col in enumerate(df.columns, start=1):
                 width = min(60, max(14, len(str(col)) + 4))
-                ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = width
+                ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = (
+                    width
+                )
             ws.freeze_panes = "A2"
     return buf.getvalue()
 

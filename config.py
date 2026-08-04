@@ -80,6 +80,17 @@ class Config:
     use_cache: bool = os.getenv("USE_CACHE", "1") not in ("0", "false", "False")
     reconcile_batch_size: int = _env_int("RECONCILE_BATCH_SIZE", 6)
 
+    # --- Web conflict resolution ---
+    # Off by default: it costs a per-search fee on top of tokens, and only OpenAI and
+    # Anthropic expose a hosted search tool.
+    web_check_conflicts: bool = os.getenv("WEB_CHECK_CONFLICTS", "0") not in (
+        "0",
+        "false",
+        "False",
+        "",
+    )
+    web_check_max_searches: int = _env_int("WEB_CHECK_MAX_SEARCHES", 4)
+
     def key_for(self, provider: str | None = None) -> str:
         p = (provider or self.provider).lower()
         if p == "anthropic":

@@ -14,7 +14,7 @@ from config import Config
 from pipeline.extractor import extract_pages
 from pipeline.models import InputRow, RunState
 from pipeline.providers import BaseProvider, Usage
-from pipeline.reconciler import reconcile
+from pipeline.reconciler import reconcile, web_resolve_conflicts
 from pipeline.schema import SchemaSpec
 from pipeline.scraper import normalize_url, scrape_rows
 from pipeline.store import new_run_id, save_run
@@ -22,15 +22,46 @@ from pipeline.store import new_run_id, save_run
 URL_RE = re.compile(r"https?://", re.I)
 
 PRODUCT_ALIASES = {
-    "product", "products", "tool", "platform", "vendor", "entity", "subject",
-    "alternative", "alternative name", "name", "company", "app",
+    "product",
+    "products",
+    "tool",
+    "platform",
+    "vendor",
+    "entity",
+    "subject",
+    "alternative",
+    "alternative name",
+    "name",
+    "company",
+    "app",
 }
 NODE_ALIASES = {
-    "node", "nodes", "category", "categories", "section", "field", "fields",
-    "topic", "group", "type", "aspect", "dimension",
+    "node",
+    "nodes",
+    "category",
+    "categories",
+    "section",
+    "field",
+    "fields",
+    "topic",
+    "group",
+    "type",
+    "aspect",
+    "dimension",
 }
-URL_ALIASES = {"url", "urls", "link", "links", "uri", "source", "source url", "page",
-               "address", "href", "reference"}
+URL_ALIASES = {
+    "url",
+    "urls",
+    "link",
+    "links",
+    "uri",
+    "source",
+    "source url",
+    "page",
+    "address",
+    "href",
+    "reference",
+}
 
 
 def _norm_header(h: str) -> str:
@@ -44,7 +75,9 @@ def _read_table(data: bytes | str, filename: str = "") -> pd.DataFrame:
     if name.endswith((".xlsx", ".xlsm", ".xls")) and isinstance(data, bytes):
         return pd.read_excel(io.BytesIO(data), dtype=str).fillna("")
 
-    text = data.decode("utf-8-sig", errors="replace") if isinstance(data, bytes) else data
+    text = (
+        data.decode("utf-8-sig", errors="replace") if isinstance(data, bytes) else data
+    )
     text = text.replace("\r\n", "\n").strip("\n")
     if not text.strip():
         raise ValueError("Input is empty.")
@@ -59,7 +92,10 @@ def _read_table(data: bytes | str, filename: str = "") -> pd.DataFrame:
             delim = ","
 
     return pd.read_csv(
-        io.StringIO(text), sep=delim, dtype=str, engine="python",
+        io.StringIO(text),
+        sep=delim,
+        dtype=str,
+        engine="python",
         skip_blank_lines=True,
     ).fillna("")
 
@@ -123,7 +159,9 @@ def parse_input(
             "'Product' column or set a default product name."
         )
     if product_col is None:
-        warnings.append(f"No Product column; assigning every row to {default_product!r}.")
+        warnings.append(
+            f"No Product column; assigning every row to {default_product!r}."
+        )
 
     rows: list[InputRow] = []
     seen: set[tuple[str, str, str]] = set()
@@ -157,6 +195,7 @@ def parse_input(
 
 
 # ------------------------------------------------------------------------ preflight
+
 
 def preflight(rows: list[InputRow], spec: SchemaSpec, cfg: Config) -> dict:
     """Report what the run will do, and what it cannot do, before spending money."""
@@ -241,7 +280,8 @@ def run_pipeline(
     """Run the pipeline, persisting state after every stage.
 
     `stages` lets the UI re-run just the tail of the pipeline -- for example redoing
-    extraction after a prompt change without re-fetching pages.
+    extraction after a prompt change without re-fetching pages. An empty `stages` with a
+    completed `state` runs nothing but the web conflict check.
     """
     rows = list(rows)
     if state is None:
@@ -255,6 +295,7 @@ def run_pipeline(
         def cb(done: int, total: int, msg: str) -> None:
             if on_progress:
                 on_progress(stage, done, total, msg)
+
         return cb
 
     usages: dict[str, Usage] = {}
@@ -275,12 +316,29 @@ def run_pipeline(
 
     if "reconcile" in stages or not state.results:
         results, usage = reconcile(
-            state.extractions, spec, cfg,
-            provider=provider, use_llm=use_llm_merge, progress=emit("reconcile"),
+            state.extractions,
+            spec,
+            cfg,
+            provider=provider,
+            use_llm=use_llm_merge,
+            progress=emit("reconcile"),
         )
         state.results = results
         usages["reconcile"] = usage
         state.stage = "reconciled"
+        save_run(state)
+
+    # Arbitration reads the reconciled results, so it runs last and can also be re-run on
+    # its own against a loaded run without repeating the merge.
+    if cfg.web_check_conflicts and provider.supports_search and state.results:
+        usages["web_check"] = web_resolve_conflicts(
+            state.results,
+            state.extractions,
+            spec,
+            cfg,
+            provider,
+            progress=emit("web check"),
+        )
         save_run(state)
 
     state.warnings = []
@@ -290,6 +348,12 @@ def run_pipeline(
     for e in state.extractions:
         if e.error:
             state.warnings.append(f"extract failed: {e.url} ({e.error})")
+    for r in state.results:
+        for rf in r.fields.values():
+            if rf.web and rf.web.error:
+                state.warnings.append(
+                    f"web check failed: {r.product}/{rf.field_key} ({rf.web.error})"
+                )
     save_run(state)
 
     return state, usages

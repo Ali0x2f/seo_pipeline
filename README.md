@@ -203,7 +203,7 @@ pipeline/
   scraper.py            crawl4ai + static pre-check, concurrent
   providers.py          OpenAI / Anthropic / DeepSeek / Ollama
   extractor.py          per-source claim extraction with quote verification
-  reconciler.py         cross-source merge, conflict detection
+  reconciler.py         cross-source merge, conflict detection, web arbitration
   exporter.py           dataframes and the workbook
   runner.py             input parsing, preflight, orchestration
   cache.py / store.py   disk cache, run persistence + backend routing
@@ -229,6 +229,31 @@ packages.txt            Chromium system deps for Streamlit Cloud
 - On Streamlit Cloud the Chromium browser is not pre-installed — click the **Install
   Chromium** button in the sidebar when first deploying.  The install persists across
   reruns but may need repeating after an idle shutdown.
+
+## Web conflict resolution
+
+A flagged conflict tells you the sources disagree but not who is right, and the scraped
+pages cannot settle it — they are the disagreement. Switch on **Resolve conflicts with
+web search** in the sidebar and each conflicting field is taken to the model's hosted
+search tool, which checks live pages (the vendor's own site first) and returns a verdict
+with citations.
+
+```bash
+WEB_CHECK_CONFLICTS=1      # off by default
+WEB_CHECK_MAX_SEARCHES=4   # hard cap per conflicting field
+```
+
+- Requires OpenAI or Anthropic — DeepSeek and Ollama have no hosted search tool, and the
+  toggle is disabled for them.
+- Runs only on conflicting fields, so cost tracks disagreement rather than schema size.
+  Searches are billed on top of tokens (about $0.01 each).
+- A resolved verdict replaces the value and keeps the previous one in
+  `value_before_web`; an unresolved or failed one leaves the value untouched and records
+  why. The conflict flag stays on either way, so a reviewer can see the cell was
+  arbitrated rather than agreed.
+- Verdicts are cached, saved with the run, shown in Review and exported in the
+  Provenance sheet. *Web-check conflicts only* in the Run tab re-checks a finished run
+  without repeating the merge.
 
 ## Storage
 

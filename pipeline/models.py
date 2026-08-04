@@ -28,7 +28,7 @@ class ScrapedPage(BaseModel):
     title: str = ""
     text: str = ""
     char_count: int = 0
-    fetch_method: str = ""          # crawl4ai | httpx-trafilatura | cache
+    fetch_method: str = ""  # crawl4ai | httpx-trafilatura | cache
     truncated: bool = False
     error: str | None = None
     fetched_at: str = Field(default_factory=_now)
@@ -72,6 +72,22 @@ class SourceExtraction(BaseModel):
         return sum(1 for c in self.claims.values() if c.found)
 
 
+class WebVerdict(BaseModel):
+    """Outcome of checking one conflicting field against live web sources."""
+
+    resolved: bool = False
+    value: str = ""
+    items: list[str] = Field(default_factory=list)
+    reasoning: str = ""
+    citations: list[str] = Field(default_factory=list)
+    searches: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    checked_at: str = Field(default_factory=_now)
+    from_cache: bool = False
+    error: str = ""
+
+
 class ReconciledField(BaseModel):
     """Final, merged value for one field of one product."""
 
@@ -82,7 +98,11 @@ class ReconciledField(BaseModel):
     source_count: int = 0
     conflict: bool = False
     conflict_note: str = ""
-    method: str = ""                # empty | single | mechanical | llm
+    method: str = ""  # empty | single | mechanical | llm | web
+    # Set only when web arbitration ran on this field. The pre-arbitration value is kept
+    # so a reviewer can see what the sources said before the web overrode them.
+    web: WebVerdict | None = None
+    value_before_web: str = ""
 
     @property
     def is_empty(self) -> bool:
@@ -99,8 +119,7 @@ class ProductResult(BaseModel):
         if not field_keys:
             return 0.0
         filled = sum(
-            1 for k in field_keys
-            if k in self.fields and not self.fields[k].is_empty
+            1 for k in field_keys if k in self.fields and not self.fields[k].is_empty
         )
         return filled / len(field_keys)
 
@@ -119,7 +138,7 @@ class RunState(BaseModel):
     extractions: list[SourceExtraction] = Field(default_factory=list)
     results: list[ProductResult] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-    stage: str = "created"          # created|scraped|extracted|reconciled
+    stage: str = "created"  # created|scraped|extracted|reconciled
 
     def touch(self) -> None:
         self.updated_at = _now()

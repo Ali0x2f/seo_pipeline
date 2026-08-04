@@ -10,6 +10,11 @@ how each one is coerced into valid JSON:
 
 A silent empty result is the worst possible outcome for this pipeline, so parse and
 validation failures raise instead of returning blank fields.
+
+Providers with a hosted web search tool additionally implement `search_json`, which
+grounds an answer in live pages and returns the URLs consulted. Only OpenAI and
+Anthropic offer this; the others report `supports_search = False` so callers can degrade
+instead of failing.
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ import random
 import re
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from jsonschema import Draft202012Validator
 
@@ -36,6 +41,9 @@ SUGGESTED_MODELS = {
 # The rest get the schema in the prompt plus a validate-and-repair loop.
 STRICT_SCHEMA_PROVIDERS = ("openai", "anthropic")
 
+# Providers with a hosted web search tool, usable for web-grounded conflict resolution.
+SEARCH_PROVIDERS = ("openai", "anthropic")
+
 
 class LLMError(RuntimeError):
     pass
@@ -49,6 +57,10 @@ class LLMResponse:
     completion_tokens: int = 0
     model: str = ""
     attempts: int = 1
+    # URLs the hosted search tool consulted, and how many searches it ran. Both stay
+    # empty for ordinary completions.
+    citations: list[str] = field(default_factory=list)
+    searches: int = 0
 
 
 @dataclass
@@ -58,11 +70,13 @@ class Usage:
     completion_tokens: int = 0
     errors: int = 0
     cached: int = 0
+    searches: int = 0  # billed separately from tokens by both vendors
 
     def add(self, r: LLMResponse) -> None:
         self.calls += 1
         self.prompt_tokens += r.prompt_tokens
         self.completion_tokens += r.completion_tokens
+        self.searches += r.searches
 
 
 # Rough USD per 1M tokens (input, output), for an order-of-magnitude estimate only.
@@ -84,6 +98,16 @@ PRICES = {
     "deepseek-v4-flash": (0.14, 0.28),
     "deepseek-v4-pro": (0.435, 0.87),
 }
+
+
+# USD per hosted web search call, charged on top of tokens. Anthropic publishes $10 per
+# 1,000 searches; OpenAI prices per 1,000 calls in the same ballpark.
+SEARCH_PRICES = {"openai": 0.010, "anthropic": 0.010}
+
+
+def estimate_search_cost(provider: str, searches: int) -> float | None:
+    price = SEARCH_PRICES.get((provider or "").lower())
+    return None if price is None else price * searches
 
 
 def estimate_cost(
@@ -171,6 +195,8 @@ def _is_retryable(exc: Exception) -> bool:
 
 class BaseProvider(ABC):
     name = "base"
+    # True only where the vendor runs the search server-side and returns citations.
+    supports_search = False
 
     def __init__(self, api_key: str, base_url: str = "", model: str = "") -> None:
         self.api_key = api_key
@@ -181,6 +207,48 @@ class BaseProvider(ABC):
     def _call(
         self, system: str, user: str, schema: dict, max_tokens: int, temperature: float
     ) -> LLMResponse: ...
+
+    def search_json(
+        self,
+        system: str,
+        user: str,
+        schema: dict,
+        max_tokens: int = 4000,
+        max_searches: int = 4,
+    ) -> LLMResponse:
+        """Answer `user` using live web search, returning JSON matching `schema`.
+
+        Search tools and strict structured output are mutually exclusive on both vendors,
+        so the schema travels in the prompt and is validated here instead. `citations`
+        carries the URLs consulted, which the caller needs in order to attribute the
+        answer.
+        """
+        raise LLMError(
+            f"{self.name} has no hosted web search tool. Use OpenAI or Anthropic for "
+            "web-grounded conflict resolution."
+        )
+
+    def _validate_searched(self, resp: LLMResponse, schema: dict) -> LLMResponse:
+        errors = sorted(
+            Draft202012Validator(schema).iter_errors(resp.data), key=lambda e: e.path
+        )
+        if errors:
+            detail = "; ".join(
+                f"{'/'.join(str(p) for p in e.path) or '<root>'}: {e.message}"
+                for e in errors[:3]
+            )
+            raise LLMError(f"Search response failed schema validation: {detail}")
+        return resp
+
+    @staticmethod
+    def _search_system(system: str, schema: dict) -> str:
+        return (
+            f"{system}\n\n"
+            "OUTPUT FORMAT: after searching, reply with a single raw JSON object and "
+            "nothing else -- no prose, no markdown fences. It must validate against this "
+            "JSON Schema, with every required key present:\n"
+            f"{json.dumps(schema, separators=(',', ':'))}"
+        )
 
     def complete_json(
         self,
@@ -258,6 +326,7 @@ class OpenAIProvider(BaseProvider):
     """
 
     name = "openai"
+    supports_search = True
     REASONING_PREFIXES = ("gpt-5", "o1", "o3", "o4")
 
     def _client(self):
@@ -312,6 +381,55 @@ class OpenAIProvider(BaseProvider):
             model=self.model,
         )
 
+    def search_json(
+        self, system, user, schema, max_tokens=4000, max_searches=4
+    ) -> LLMResponse:
+        # The hosted web_search tool lives on the Responses API only, and cannot be
+        # combined with a strict json_schema text format, so the schema goes in the
+        # prompt and is validated below.
+        kwargs: dict = {
+            "model": self.model,
+            "instructions": self._search_system(system, schema),
+            "input": user,
+            "tools": [{"type": "web_search"}],
+            "tool_choice": "auto",
+            "max_output_tokens": max_tokens,
+        }
+        if self.is_reasoning:
+            kwargs["reasoning"] = {"effort": "low"}
+
+        resp = self._client().responses.create(**kwargs)
+
+        text = (getattr(resp, "output_text", "") or "").strip()
+        citations: list[str] = []
+        searches = 0
+        for item in getattr(resp, "output", []) or []:
+            kind = getattr(item, "type", "")
+            if kind == "web_search_call":
+                searches += 1
+            elif kind == "message":
+                for block in getattr(item, "content", []) or []:
+                    for ann in getattr(block, "annotations", []) or []:
+                        url = getattr(ann, "url", "")
+                        if url and url not in citations:
+                            citations.append(url)
+
+        if not text:
+            raise LLMError("Search returned no text output.")
+        u = getattr(resp, "usage", None)
+        return self._validate_searched(
+            LLMResponse(
+                data=extract_json_object(text),
+                raw=text,
+                prompt_tokens=getattr(u, "input_tokens", 0) or 0,
+                completion_tokens=getattr(u, "output_tokens", 0) or 0,
+                model=self.model,
+                citations=citations,
+                searches=searches,
+            ),
+            schema,
+        )
+
 
 class AnthropicProvider(BaseProvider):
     """Anthropic via a forced tool call, whose input schema guarantees the shape.
@@ -323,6 +441,7 @@ class AnthropicProvider(BaseProvider):
     """
 
     name = "anthropic"
+    supports_search = True
     # Models that reject non-default sampling parameters and accept `effort`.
     NO_SAMPLING_PREFIXES = (
         "claude-fable-5",
@@ -384,6 +503,75 @@ class AnthropicProvider(BaseProvider):
             prompt_tokens=resp.usage.input_tokens,
             completion_tokens=resp.usage.output_tokens,
             model=self.model,
+        )
+
+    def search_json(
+        self, system, user, schema, max_tokens=4000, max_searches=4
+    ) -> LLMResponse:
+        # A forced tool call cannot be combined with the server-side search tool -- the
+        # model needs free turns to search before answering -- so the schema goes in the
+        # prompt and the JSON is recovered from the final text blocks.
+        client = self._client()
+        messages: list[dict] = [{"role": "user", "content": user}]
+        kwargs: dict = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "system": self._search_system(system, schema),
+            "tools": [
+                {
+                    "type": "web_search_20250305",
+                    "name": "web_search",
+                    "max_uses": max_searches,
+                }
+            ],
+        }
+
+        citations: list[str] = []
+        searches = 0
+        prompt_tokens = completion_tokens = 0
+        text = ""
+
+        # A long search turn can come back as `pause_turn`; the documented way to finish
+        # it is to send the partial assistant message straight back.
+        for _ in range(4):
+            resp = client.messages.create(messages=messages, **kwargs)
+            prompt_tokens += resp.usage.input_tokens
+            completion_tokens += resp.usage.output_tokens
+            server_use = getattr(resp.usage, "server_tool_use", None)
+            searches += getattr(server_use, "web_search_requests", 0) or 0
+
+            for block in resp.content:
+                btype = getattr(block, "type", "")
+                if btype == "text":
+                    text += getattr(block, "text", "")
+                    for cit in getattr(block, "citations", []) or []:
+                        url = getattr(cit, "url", "")
+                        if url and url not in citations:
+                            citations.append(url)
+                elif btype == "web_search_tool_result":
+                    content = getattr(block, "content", None)
+                    for r in content if isinstance(content, list) else []:
+                        url = getattr(r, "url", "")
+                        if url and url not in citations:
+                            citations.append(url)
+
+            if resp.stop_reason != "pause_turn":
+                break
+            messages = messages + [{"role": "assistant", "content": resp.content}]
+
+        if not text.strip():
+            raise LLMError("Search returned no text output.")
+        return self._validate_searched(
+            LLMResponse(
+                data=extract_json_object(text),
+                raw=text[:4000],
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                model=self.model,
+                citations=citations,
+                searches=searches,
+            ),
+            schema,
         )
 
 

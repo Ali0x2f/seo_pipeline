@@ -70,9 +70,11 @@ from pipeline import exporter
 from pipeline.models import RunState
 from pipeline.providers import (
     PROVIDERS,
+    SEARCH_PROVIDERS,
     SUGGESTED_MODELS,
     build_provider,
     estimate_cost,
+    estimate_search_cost,
 )
 from pipeline.runner import parse_input, preflight, run_pipeline
 from pipeline.schema import (
@@ -151,6 +153,10 @@ def build_cfg() -> Config:
     cfg.settle_delay_s = ss.get("settle_delay_s", cfg.settle_delay_s)
     cfg.use_cache = ss.get("use_cache", cfg.use_cache)
     cfg.reconcile_batch_size = ss.get("reconcile_batch_size", cfg.reconcile_batch_size)
+    cfg.web_check_conflicts = ss.get("web_check_conflicts", cfg.web_check_conflicts)
+    cfg.web_check_max_searches = ss.get(
+        "web_check_max_searches", cfg.web_check_max_searches
+    )
 
     # Credentials and endpoints are stored per provider, so switching provider cannot
     # leak the previous one's base URL or key into the new one.
@@ -290,6 +296,39 @@ def render_sidebar() -> None:
                 st.success(msg)
             except Exception as e:
                 st.error(f"{type(e).__name__}: {e}")
+
+        # ── Web conflict resolution ───────────────────────────────
+        st.divider()
+        can_search = provider in SEARCH_PROVIDERS
+        st.toggle(
+            "Resolve conflicts with web search",
+            key="web_check_conflicts",
+            value=False,
+            disabled=not can_search,
+            help="After merging, take every field where sources disagree to the web. "
+            "The model searches live pages — the vendor's own site first — and either "
+            "settles the conflict with citations or reports that it could not.",
+        )
+        if not can_search:
+            st.caption(
+                f"Not available for {provider}: only OpenAI and Anthropic host a web "
+                "search tool. Switch provider to enable this."
+            )
+        elif ss.get("web_check_conflicts"):
+            st.number_input(
+                "Max searches per conflict",
+                1,
+                10,
+                4,
+                1,
+                key="web_check_max_searches",
+                help="Hard cap per field. Each search is billed on top of tokens "
+                "(about $0.01).",
+            )
+            st.caption(
+                "Runs only on conflicting fields, so cost scales with disagreement, "
+                "not schema size. Verdicts are cached and shown in Review."
+            )
 
         with st.expander("Extraction settings"):
             st.slider("Temperature", 0.0, 1.0, 0.1, 0.05, key="temperature")
@@ -728,20 +767,48 @@ def tab_run() -> None:
         "contradictions. Off: free mechanical dedupe, no semantic merging.",
     )
 
+    if cfg.web_check_conflicts:
+        if cfg.provider in SEARCH_PROVIDERS:
+            st.caption(
+                "Web conflict resolution is **on** — after merging, each conflicting "
+                "field is checked against live web sources. Turn it off in the sidebar."
+            )
+        else:
+            st.warning(
+                f"Web conflict resolution is on but {cfg.provider} has no web search "
+                "tool, so it will be skipped. Switch to OpenAI or Anthropic to use it."
+            )
+
     opts = {
         "Everything (scrape → extract → merge)": ("scrape", "extract", "reconcile"),
         "Re-extract and merge (reuse fetched pages)": ("extract", "reconcile"),
         "Re-merge only (reuse extractions)": ("reconcile",),
+        "Web-check conflicts only (reuse merged results)": (),
     }
     choice = st.radio("Stages", list(opts), horizontal=False, key="run_stages")
     stages = opts[choice]
 
     prior: RunState | None = st.session_state.run
-    if stages != ("scrape", "extract", "reconcile") and prior is None:
+    full = ("scrape", "extract", "reconcile")
+
+    if not stages:
+        # Web-check-only reuses the merged results as they stand, so it needs both a
+        # completed run to read and the toggle that actually performs the check.
+        if not cfg.web_check_conflicts:
+            st.warning(
+                "This option runs only the web check, which is switched off in the "
+                "sidebar. Enable the toggle first."
+            )
+        if prior is None or not prior.results:
+            st.warning(
+                "No merged results in this session to check. Run the pipeline or load a "
+                "completed run first."
+            )
+    elif stages != full and prior is None:
         st.warning(
             "No previous run in this session; the full pipeline will run instead."
         )
-        stages = ("scrape", "extract", "reconcile")
+        stages = full
 
     job = st.session_state.job
 
@@ -759,7 +826,7 @@ def tab_run() -> None:
                 cfg=cfg,
                 provider=provider,
                 use_llm_merge=use_llm_merge,
-                state=prior if stages != ("scrape", "extract", "reconcile") else None,
+                state=prior if stages != full else None,
                 stages=stages,
             )
             st.session_state.job_stages = stages
@@ -805,17 +872,25 @@ def tab_run() -> None:
         d3.metric("Extractions", s["extractions"])
         d4.metric("Extraction errors", s["extraction_errors"], delta_color="inverse")
 
-        total_in = total_out = 0
+        total_in = total_out = total_searches = 0
         for name, u in (st.session_state.usages or {}).items():
             total_in += u.prompt_tokens
             total_out += u.completion_tokens
-            st.caption(
+            total_searches += u.searches
+            line = (
                 f"{name}: {u.calls} live call(s), {u.cached} cached, {u.errors} error(s), "
                 f"{u.prompt_tokens:,} in / {u.completion_tokens:,} out tokens"
             )
-        actual = estimate_cost(state.model, total_in, total_out)
-        if actual:
-            st.caption(f"Approximate spend this run: **${actual:.3f}**")
+            if u.searches:
+                line += f", {u.searches} web search(es)"
+            st.caption(line)
+        actual = estimate_cost(state.model, total_in, total_out) or 0.0
+        search_cost = estimate_search_cost(state.provider, total_searches) or 0.0
+        if actual or search_cost:
+            note = f"Approximate spend this run: **${actual + search_cost:.3f}**"
+            if search_cost:
+                note += f" (including ${search_cost:.3f} of web searches)"
+            st.caption(note)
 
         if state.warnings:
             with st.expander(f"{len(state.warnings)} warning(s)"):
@@ -828,6 +903,39 @@ def tab_run() -> None:
 
 
 # ---------------------------------------------------------------------- review tab
+
+
+def render_web_verdict(rf, key_prefix: str) -> None:
+    """Show what the web check concluded for one field, if it ran."""
+    v = getattr(rf, "web", None)
+    if v is None:
+        return
+
+    st.divider()
+    if v.error:
+        st.error(f"Web check failed: {v.error}")
+        return
+
+    if v.resolved:
+        st.success("Settled by web search")
+        if rf.value_before_web:
+            st.caption(f"Before the check: {rf.value_before_web}")
+    else:
+        st.info(
+            "The web check ran but could not settle this — the sources still disagree, "
+            "so the merged value is unchanged and needs a human decision."
+        )
+    if v.reasoning:
+        st.markdown(f"> {v.reasoning}")
+    if v.citations:
+        st.caption("Pages consulted:")
+        for url in v.citations[:8]:
+            st.markdown(f"- [{url[:90]}]({url})")
+    else:
+        st.caption(
+            "The model returned no citations, so this verdict cannot be traced to a "
+            "page. Treat it as unverified."
+        )
 
 
 def tab_review() -> None:
@@ -849,12 +957,17 @@ def tab_review() -> None:
         if r.fields.get(f.key) and r.fields[f.key].conflict
     ]
     if conflicts:
-        st.warning(
+        settled = sum(1 for _, _, rf in conflicts if rf.web and rf.web.resolved)
+        msg = (
             f"{len(conflicts)} field(s) where sources disagree. These need a human "
             "decision before publishing."
         )
+        if settled:
+            msg += f" {settled} of them were settled by a web check."
+        st.warning(msg)
         for product, label, rf in conflicts:
-            with st.expander(f"{product} · {label}"):
+            mark = "✅ " if rf.web and rf.web.resolved else ""
+            with st.expander(f"{mark}{product} · {label}"):
                 st.write(rf.conflict_note or "(no note)")
                 st.text_area(
                     "Merged value",
@@ -864,6 +977,7 @@ def tab_review() -> None:
                     disabled=True,
                 )
                 st.caption("Sources: " + ", ".join(rf.sources))
+                render_web_verdict(rf, f"cf_{product}_{label}")
 
     st.markdown("**Dataset**")
     transposed = st.toggle(
@@ -905,6 +1019,8 @@ def tab_review() -> None:
     a.metric("Sources", rf.source_count)
     b.metric("Merge method", rf.method or "-")
     c.metric("Conflict", "yes" if rf.conflict else "no")
+
+    render_web_verdict(rf, f"trace_{product}_{key}")
 
     # Explain *why* a value is empty so the user knows whether it's
     # a data gap (no sources covered this) or a processing failure.
@@ -1511,6 +1627,13 @@ def tab_help() -> None:
         flags genuine contradictions (e.g. two different starting prices).  A mechanical
         fallback catches cases where the LLM returns nothing.
 
+        **3b. Web check** *(optional)* — Flagging a conflict says the sources disagree,
+        not who is right, and the scraped pages cannot settle it — they *are* the
+        disagreement.  Switch on **Resolve conflicts with web search** in the sidebar and
+        each conflicting field goes to the model's hosted search tool, which checks live
+        pages (the vendor's own site first) and either settles it with citations or says
+        it could not.
+
         **4. Review** — Inspect conflicts, trace any cell back to its source URLs and
         individual claims, and check coverage (which fields are empty, which rely on a
         single source).
@@ -1558,7 +1681,30 @@ def tab_help() -> None:
           after an idle shutdown on Streamlit Cloud).
         - **Model** — Pick your LLM provider and model.  Each provider remembers its
           own API key, endpoint, and model, so switching is safe.
+        - **Resolve conflicts with web search** — Fact-check disagreements against live
+          web pages.  See below.
         - **Parameters** — Temperature, token budget, concurrency, cache toggle.
+
+        ### Web conflict resolution
+
+        Enabled with the sidebar toggle, this adds a pass after merging that fact-checks
+        every field where sources disagree.
+
+        - **Only OpenAI and Anthropic** host a web search tool, so the toggle is disabled
+          for DeepSeek and Ollama.
+        - **Only conflicting fields** are checked, so the cost scales with disagreement,
+          not with schema size.  Each search costs roughly $0.01 on top of tokens; cap
+          them per field with *Max searches per conflict*.
+        - **Three outcomes.**  *Resolved* replaces the value and records the reasoning,
+          the citations, and what the value was before.  *Unresolved* leaves the merged
+          value untouched and says so.  *Failed* records the error — the run continues
+          either way.
+        - **The conflict flag stays on** even when a check succeeds: the sources really
+          did disagree, and a reviewer should see that the cell was arbitrated rather
+          than agreed.
+        - **Verdicts are cached**, saved with the run, shown in Review, and exported in
+          the Provenance sheet.  *Web-check conflicts only* in the Run tab re-checks a
+          finished run without repeating the merge.
 
         ### Tips
 
@@ -1567,6 +1713,9 @@ def tab_help() -> None:
           re-run.
         - **Review conflicts first.**  Fields marked `[CONFLICT]` are where errors
           concentrate — two sources gave incompatible facts.
+        - **Let the web settle stale figures.**  Pricing and integration counts are the
+          usual culprits, and blog posts go out of date.  The web check reads the
+          vendor's own page, so it is the cheapest way to fix those cells.
         - **Single-source fields are unverified.**  If only one page covered a field,
           there is no cross-check.  Verify those cells manually.
         - **The cache is your friend.**  Re-running an unchanged pipeline costs nothing

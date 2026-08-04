@@ -13,20 +13,34 @@ problems this module exists to solve:
 
 Mechanical merging is available for a zero-cost pass; the LLM merge is the default
 because only it can spot semantic duplicates and genuine contradictions.
+
+Flagging a conflict tells the reviewer the sources disagree but not who is right, and
+the scraped pages cannot settle it -- they are the disagreement. Optional web
+arbitration takes each conflicting field to the vendor's hosted search tool, which
+checks live pages (typically the vendor's own) and returns a verdict with citations.
+It runs only on fields already marked as conflicts, so cost scales with disagreement
+rather than schema size.
 """
 
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
 from config import Config
 from pipeline.cache import DiskCache, make_key
-from pipeline.models import ProductResult, ReconciledField, SourceExtraction
+from pipeline.models import (
+    ProductResult,
+    ReconciledField,
+    SourceExtraction,
+    WebVerdict,
+)
 from pipeline.providers import BaseProvider, Usage
 from pipeline.schema import FieldSpec, SchemaSpec
 
 RECONCILE_CACHE_VERSION = 2
+WEB_CHECK_CACHE_VERSION = 1
 ProgressCb = Callable[[int, int, str], None] | None
 
 SYSTEM_PROMPT = (
@@ -336,6 +350,261 @@ def _llm_merge_batch(
             )
         out[field.key] = rf
     return out
+
+
+# ------------------------------------------------------------------ web arbitration
+
+
+WEB_SYSTEM_PROMPT = (
+    "You are a fact-checker settling disagreements between research sources.\n"
+    "You will be given a product, a field, and the conflicting values that different "
+    "pages claimed for it.\n"
+    "Search the web to establish which claim is correct today. Prefer the vendor's own "
+    "official pages (pricing, docs, changelog) over blogs, listicles and affiliate "
+    "reviews, which go stale and are often wrong.\n"
+    "Rules:\n"
+    "1. Base the verdict only on what you actually found while searching. Never fall "
+    "back on memory.\n"
+    "2. If the search confirms one of the claims, or gives a more accurate current "
+    "value, set resolved=true and give that value.\n"
+    "3. If sources genuinely still disagree, or you cannot find authoritative "
+    "confirmation, set resolved=false and leave the value empty. An honest "
+    "'unresolved' is far more useful than a confident guess.\n"
+    "4. A value that changed over time is not a contradiction to average out. Report "
+    "what is true now and say so in reasoning.\n"
+    "5. In reasoning, state in 1-3 sentences what you found and which source settled "
+    "it. Be specific about figures.\n"
+    "6. Write plain factual English. No marketing language."
+)
+
+
+def _web_check_schema(field: FieldSpec) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "resolved": {
+                "type": "boolean",
+                "description": "True only if search established the correct value.",
+            },
+            "value": field.json_value_property(),
+            "reasoning": {
+                "type": "string",
+                "description": "What you found and which source settled it.",
+            },
+        },
+        "required": ["resolved", "value", "reasoning"],
+        "additionalProperties": False,
+    }
+
+
+def _web_check_prompt(
+    spec: SchemaSpec,
+    product: str,
+    field: FieldSpec,
+    rf: ReconciledField,
+    claims: list[tuple[str, list[str]]],
+) -> str:
+    shape = {
+        "list": f"a list of up to {field.max_items} distinct points",
+        "short_text": "one short phrase",
+        "prose": "2-4 sentences",
+    }[field.shape.value]
+
+    lines = [
+        f"{spec.entity_label.upper()}: {product}",
+        f"FIELD: {field.label} ({field.key})",
+        f"QUESTION: {field.question.strip()}",
+    ]
+    if field.guidance.strip():
+        lines.append(f"GUIDANCE: {field.guidance.strip()}")
+    lines += [f"ANSWER SHAPE: {shape}", "", "CONFLICTING CLAIMS FROM SCRAPED SOURCES:"]
+    for i, (url, vals) in enumerate(claims, 1):
+        lines.append(f"  [{i}] {url}")
+        for v in vals:
+            lines.append(f"      - {v}")
+    if rf.conflict_note:
+        lines += ["", f"WHY THIS WAS FLAGGED: {rf.conflict_note}"]
+    lines += [
+        "",
+        f"Search the web and determine the correct current answer for {product}. "
+        "Check the vendor's own site first.",
+    ]
+    return "\n".join(lines)
+
+
+def _web_check_field(
+    spec: SchemaSpec,
+    product: str,
+    field: FieldSpec,
+    rf: ReconciledField,
+    claims: list[tuple[str, list[str]]],
+    provider: BaseProvider,
+    cfg: Config,
+    cache: DiskCache,
+) -> WebVerdict:
+    """Arbitrate one conflicting field. Never raises: failures become a noted verdict."""
+    ck = make_key(
+        "webcheck",
+        WEB_CHECK_CACHE_VERSION,
+        provider.name,
+        provider.model,
+        cfg.web_check_max_searches,
+        product,
+        field.key,
+        rf.value,
+        rf.conflict_note,
+        *[f"{u}:{v}" for u, v in claims],
+    )
+    cached = cache.get(ck)
+    if cached is not None:
+        try:
+            verdict = WebVerdict.model_validate(cached)
+            # Cached tokens and searches were already paid for on the original run.
+            verdict.prompt_tokens = verdict.completion_tokens = verdict.searches = 0
+            verdict.from_cache = True
+            return verdict
+        except Exception:  # noqa: BLE001 - stale cache shape, just re-run
+            pass
+
+    try:
+        resp = provider.search_json(
+            WEB_SYSTEM_PROMPT,
+            _web_check_prompt(spec, product, field, rf, claims),
+            _web_check_schema(field),
+            max_tokens=cfg.max_output_tokens,
+            max_searches=cfg.web_check_max_searches,
+        )
+    except Exception as e:  # noqa: BLE001 - surfaced on the field, run continues
+        return WebVerdict(resolved=False, error=f"{type(e).__name__}: {e}")
+
+    data = resp.data or {}
+    raw = data.get("value")
+    if isinstance(raw, list):
+        items = [str(x).strip() for x in raw if str(x).strip()]
+    else:
+        items = [str(raw).strip()] if str(raw or "").strip() else []
+    if field.is_list:
+        items = _dedupe_points(items, field.max_items)
+
+    verdict = WebVerdict(
+        # A "resolved" verdict with no value is not usable, so treat it as unresolved.
+        resolved=bool(data.get("resolved")) and bool(items),
+        value=field.render(items, spec.list_output),
+        items=items,
+        reasoning=str(data.get("reasoning") or "").strip(),
+        citations=resp.citations,
+        searches=resp.searches,
+        prompt_tokens=resp.prompt_tokens,
+        completion_tokens=resp.completion_tokens,
+    )
+    cache.set(ck, verdict.model_dump())
+    return verdict
+
+
+def _apply_verdict(rf: ReconciledField, verdict: WebVerdict) -> None:
+    """Fold a verdict into the field, keeping the conflict visible either way."""
+    rf.web = verdict
+    if not verdict.resolved:
+        note = (
+            f"Web check failed ({verdict.error})"
+            if verdict.error
+            else "Web check could not settle this"
+        )
+        detail = f": {verdict.reasoning}" if verdict.reasoning else ""
+        rf.conflict_note = f"{rf.conflict_note} | {note}{detail}".strip(" |")
+        return
+
+    rf.value_before_web = rf.value
+    rf.value, rf.items = verdict.value, verdict.items
+    rf.method = "web"
+    # The conflict flag stays on: the sources really did disagree, and a reviewer should
+    # still see that this cell was arbitrated rather than agreed.
+    cites = ", ".join(verdict.citations[:3]) or "no citations returned"
+    rf.conflict_note = (
+        f"{rf.conflict_note} | Resolved by web check: {verdict.reasoning} "
+        f"[was: {rf.value_before_web or '(empty)'}] Sources: {cites}"
+    ).strip(" |")
+
+
+def web_resolve_conflicts(
+    results: list[ProductResult],
+    extractions: list[SourceExtraction],
+    spec: SchemaSpec,
+    cfg: Config,
+    provider: BaseProvider,
+    progress: ProgressCb = None,
+) -> Usage:
+    """Second pass over conflicting fields, checking each against live web sources."""
+    usage = Usage()
+    if not provider.supports_search:
+        return usage
+
+    cache = DiskCache("webcheck", enabled=cfg.use_cache)
+    grouped = _collect(extractions, spec)
+    by_key = {f.key: f for f in spec.fields}
+
+    jobs: list[tuple[ProductResult, FieldSpec, ReconciledField, list]] = []
+    for r in results:
+        for key, rf in r.fields.items():
+            field = by_key.get(key)
+            if rf.conflict and field is not None and field.fill_from.value != "entity":
+                jobs.append((r, field, rf, grouped.get(r.product, {}).get(key, [])))
+
+    total = len(jobs)
+    if not total:
+        if progress:
+            progress(1, 1, "no conflicts to check")
+        return usage
+
+    done = 0
+    if progress:
+        progress(0, total, f"checking {total} conflicting field(s) against the web")
+
+    # Searches are slow and network-bound, so they overlap; the vendor rate-limits them.
+    workers = max(1, min(cfg.llm_concurrency, total))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(
+                _web_check_field,
+                spec,
+                r.product,
+                field,
+                rf,
+                claims,
+                provider,
+                cfg,
+                cache,
+            ): (r, field, rf)
+            for r, field, rf, claims in jobs
+        }
+        for fut in as_completed(futures):
+            r, field, rf = futures[fut]
+            try:
+                verdict = fut.result()
+            except Exception as e:  # noqa: BLE001 - defensive; _web_check_field catches
+                verdict = WebVerdict(resolved=False, error=f"{type(e).__name__}: {e}")
+
+            _apply_verdict(rf, verdict)
+            if verdict.error:
+                usage.errors += 1
+            elif verdict.from_cache:
+                usage.cached += 1
+            else:
+                usage.calls += 1
+            usage.prompt_tokens += verdict.prompt_tokens
+            usage.completion_tokens += verdict.completion_tokens
+            usage.searches += verdict.searches
+
+            done += 1
+            if progress:
+                state = (
+                    "resolved"
+                    if verdict.resolved
+                    else ("failed" if verdict.error else "unresolved")
+                )
+                progress(done, total, f"{r.product}: {field.key} -- {state}")
+
+    return usage
 
 
 # -------------------------------------------------------------------------- public
