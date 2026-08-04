@@ -67,7 +67,7 @@ class Config:
     scrape_concurrency: int = _env_int("SCRAPE_CONCURRENCY", 4)
     page_timeout_ms: int = _env_int("PAGE_TIMEOUT_MS", 60000)
     settle_delay_s: float = _env_float("SETTLE_DELAY_S", 2.5)
-    max_scrape_chars: int = _env_int("MAX_SCRAPE_CHARS", 40000)
+    max_scrape_chars: int = _env_int("MAX_SCRAPE_CHARS", 50000)
     thin_content_chars: int = _env_int("THIN_CONTENT_CHARS", 600)
     request_timeout_s: int = _env_int("REQUEST_TIMEOUT_S", 30)
     user_agent: str = os.getenv(
