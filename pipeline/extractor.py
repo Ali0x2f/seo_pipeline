@@ -33,16 +33,13 @@ SYSTEM_PROMPT = (
     "You are a meticulous research analyst building a factual comparison dataset.\n"
     "Rules you must never break:\n"
     "1. Use ONLY the supplied page text. Never use prior knowledge about the product.\n"
-    "2. The page may discuss several competing products. Describe ONLY the subject "
-    "product named in the request. Statements about any other product must be ignored, "
-    "even when the page presents them side by side.\n"
-    "3. If the page does not address a field, set found=false, leave the value empty, "
+    "2. If the page does not address a field, set found=false, leave the value empty, "
     "and move on. An honest gap is far more useful than a guess.\n"
-    "4. Every field you mark found=true must include a short verbatim quote copied "
+    "3. Every field you mark found=true must include a short verbatim quote copied "
     "character-for-character from the page text as support.\n"
-    "5. Report what the page claims, not whether you agree. Do not soften criticism and "
+    "4. Report what the page claims, not whether you agree. Do not soften criticism and "
     "do not repeat marketing slogans as if they were facts.\n"
-    "6. Prefer specific, checkable detail (numbers, tier names, limits) over generalities."
+    "5. Prefer specific, checkable detail (numbers, tier names, limits) over generalities."
 )
 
 
@@ -66,13 +63,13 @@ def build_extraction_schema(fields: list[FieldSpec]) -> dict:
                 "found": {
                     "type": "boolean",
                     "description": "True only if the page text addresses this field "
-                                   "for the subject product.",
+                    "for the subject product.",
                 },
                 "value": f.json_value_property(),
                 "quote": {
                     "type": "string",
                     "description": "A short verbatim excerpt from the page text "
-                                   "supporting the value. Empty when found is false.",
+                    "supporting the value. Empty when found is false.",
                 },
             },
             "required": ["found", "value", "quote"],
@@ -203,8 +200,15 @@ def extract_page(
 
     fingerprint = make_key(*[f"{f.key}|{f.shape}|{f.prompt_line()}" for f in fields])
     ck = make_key(
-        "extract", EXTRACT_CACHE_VERSION, provider.name, provider.model,
-        cfg.temperature, page.product, page.url, fingerprint, page.text,
+        "extract",
+        EXTRACT_CACHE_VERSION,
+        provider.name,
+        provider.model,
+        cfg.temperature,
+        page.product,
+        page.url,
+        fingerprint,
+        page.text,
     )
     hit = cache.get(ck)
     if hit is not None:
@@ -216,13 +220,16 @@ def extract_page(
     user = build_user_prompt(spec, fields, page, page.product)
     try:
         resp = provider.complete_json(
-            SYSTEM_PROMPT, user, schema,
-            max_tokens=cfg.max_output_tokens, temperature=cfg.temperature,
+            SYSTEM_PROMPT,
+            user,
+            schema,
+            max_tokens=cfg.max_output_tokens,
+            temperature=cfg.temperature,
         )
     except LLMError as e:
         base.error = str(e)
         return base
-    except Exception as e:                                   # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
         base.error = f"{type(e).__name__}: {e}"
         return base
 
