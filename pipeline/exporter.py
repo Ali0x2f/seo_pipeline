@@ -64,9 +64,12 @@ def build_brief(spec: SchemaSpec) -> pd.DataFrame:
                 "Key": f.key,
                 "Shape": f.shape.value,
                 "Source": f.fill_from.value,
-                "Fed by nodes": ", ".join(f.nodes) if f.nodes else "(all nodes)",
+                "Section": f.section,
+                "Source URLs": "\n".join(f.source_urls),
+                "Custom input": f.custom_input.strip(),
                 "Description": f.question.strip(),
                 "Guidance": f.guidance.strip(),
+                "Anchors": f.anchors.strip(),
             }
             for f in spec.fields
         ]

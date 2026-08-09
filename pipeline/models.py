@@ -12,26 +12,46 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+# Analyst-pasted evidence is a source like any fetched page, so it flows through the same
+# models under a reserved url scheme rather than a parallel code path.
+CUSTOM_INPUT_METHOD = "custom-input"
+CUSTOM_INPUT_SCHEME = "custom:"
+
+
+def custom_input_url(field_key: str) -> str:
+    return f"{CUSTOM_INPUT_SCHEME}{field_key}"
+
+
 class InputRow(BaseModel):
     """One line of the user's input sheet."""
 
     product: str
-    node: str
+    node: str = ""
     url: str
+    # Field keys this source is meant to answer. Empty falls back to the schema's own
+    # key->URL map, then to node routing.
+    keys: list[str] = Field(default_factory=list)
+    # Set only for `custom:` rows, where the evidence is pasted rather than fetched.
+    custom_text: str = ""
 
 
 class ScrapedPage(BaseModel):
     url: str
-    node: str
+    node: str = ""
     product: str
+    keys: list[str] = Field(default_factory=list)
     success: bool = False
     title: str = ""
     text: str = ""
     char_count: int = 0
-    fetch_method: str = ""  # crawl4ai | httpx-trafilatura | cache
+    fetch_method: str = ""  # crawl4ai | httpx-trafilatura | cache | custom-input
     truncated: bool = False
     error: str | None = None
     fetched_at: str = Field(default_factory=_now)
+
+    @property
+    def is_custom_input(self) -> bool:
+        return self.fetch_method == CUSTOM_INPUT_METHOD
 
     @property
     def is_thin(self) -> bool:

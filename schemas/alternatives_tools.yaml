@@ -3,10 +3,7 @@ version: 1
 entity_label: Product
 description: Imported from workbook sheet 'Data structure v 1.2 Tools'.
 scenario: tools
-nodes:
-- Strengths
-- Limitations
-- Pricing
+nodes: []
 list_output: semicolon
 fields:
 - key: tool_strengths
@@ -14,8 +11,6 @@ fields:
   question: Capture key strengths and advantages of the product for both individual users, prosumers or
     hobby users as well as companies, organisations, or teams
   shape: list
-  nodes:
-  - Strengths
   max_items: 10
   fill_from: extract
   section: 1. Zapier
@@ -29,8 +24,6 @@ fields:
   question: Capture key limitations and drawbacks of the product for both individual users, prosumers
     or hobby users as well as companies, organisations, or teams
   shape: list
-  nodes:
-  - Limitations
   max_items: 10
   fill_from: extract
   section: 1. Zapier
@@ -44,8 +37,6 @@ fields:
   question: 'Capture key attributes of the tool''s pricing. Specifically the distribution model: whether
     it''s open source, closed source, if there are any caveats.'
   shape: short_text
-  nodes:
-  - Pricing
   max_items: 10
   fill_from: extract
   section: 1. Zapier
@@ -58,8 +49,6 @@ fields:
   question: Capture key attributes of the tool's pricing. Specifically whether it's available for self-serve
     adoption or requires sales process. If the product has both, in that case identify the dominant motion.
   shape: short_text
-  nodes:
-  - Pricing
   max_items: 10
   fill_from: extract
   section: 1. Zapier
@@ -73,8 +62,6 @@ fields:
     around: is it per-seat, is it usage-based. If usage-based, what is it calculated againts: number of
     nodes, execution time or something else. If it includes multiple, mention it.'
   shape: short_text
-  nodes:
-  - Pricing
   max_items: 10
   fill_from: extract
   section: 1. Zapier
@@ -88,8 +75,6 @@ fields:
     will pay. If there's a free tier (freemium), mention it and specify what key limitations it has (usage,
     features, or something else)
   shape: short_text
-  nodes:
-  - Pricing
   max_items: 10
   fill_from: extract
   section: 1. Zapier

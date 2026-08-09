@@ -28,7 +28,12 @@ from urllib.parse import urlparse, urlunparse
 
 from config import Config
 from pipeline.cache import DiskCache, make_key
-from pipeline.models import InputRow, ScrapedPage
+from pipeline.models import (
+    CUSTOM_INPUT_METHOD,
+    CUSTOM_INPUT_SCHEME,
+    InputRow,
+    ScrapedPage,
+)
 
 SCRAPE_CACHE_VERSION = 4
 PER_DOMAIN_DELAY_S = 1.0
@@ -408,8 +413,12 @@ def scrape_rows(
     rows = list(rows)
     cache = DiskCache("scrape", enabled=cfg.use_cache)
 
+    # Analyst-pasted evidence is already text, so it becomes a page without a fetch.
+    inline = [r for r in rows if r.url.startswith(CUSTOM_INPUT_SCHEME)]
+    web_rows = [r for r in rows if not r.url.startswith(CUSTOM_INPUT_SCHEME)]
+
     canon: dict[str, str] = {}
-    for r in rows:
+    for r in web_rows:
         canon[r.url] = normalize_url(r.url)
     distinct = sorted({v for v in canon.values() if v})
 
@@ -418,7 +427,7 @@ def scrape_rows(
     )
 
     pages: list[ScrapedPage] = []
-    for r in rows:
+    for r in web_rows:
         cu = canon.get(r.url, "")
         payload = fetched.get(cu)
         if payload is None:
@@ -427,6 +436,7 @@ def scrape_rows(
                     url=r.url,
                     node=r.node,
                     product=r.product,
+                    keys=list(r.keys),
                     success=False,
                     error="Invalid or empty URL",
                 )
@@ -444,6 +454,7 @@ def scrape_rows(
                 url=r.url,
                 node=r.node,
                 product=r.product,
+                keys=list(r.keys),
                 success=bool(payload.get("success")) and bool(text),
                 title=payload.get("title") or "",
                 text=text,
@@ -451,6 +462,24 @@ def scrape_rows(
                 fetch_method=payload.get("fetch_method") or "",
                 truncated=truncated,
                 error=payload.get("error"),
+            )
+        )
+
+    for r in inline:
+        text = (r.custom_text or "").strip()
+        pages.append(
+            ScrapedPage(
+                url=r.url,
+                node=r.node,
+                product=r.product,
+                keys=list(r.keys),
+                success=bool(text),
+                title="Analyst-supplied evidence",
+                text=text[: cfg.max_scrape_chars],
+                char_count=len(text[: cfg.max_scrape_chars]),
+                fetch_method=CUSTOM_INPUT_METHOD,
+                truncated=len(text) > cfg.max_scrape_chars,
+                error=None if text else "Custom input is empty",
             )
         )
     return pages

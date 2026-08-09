@@ -68,7 +68,7 @@ from jobs import start_job
 from pipeline import cache as cache_mod
 from pipeline import exporter
 from pipeline.brief import list_sheets, parse_brief_sheet
-from pipeline.models import InputRow, RunState
+from pipeline.models import CUSTOM_INPUT_SCHEME, InputRow, RunState
 from pipeline.prompts import (
     SCENARIO_LABELS,
     STAGES,
@@ -429,10 +429,6 @@ def render_sidebar() -> None:
 
 # --------------------------------------------------------------------- schema editor
 
-# Node names routinely contain commas (e.g. "Strengths, limitations, best for"), so the
-# editor separates lists with a pipe. Commas here would silently shred such names.
-NODE_SEP = "|"
-
 
 def fields_to_df(spec: SchemaSpec) -> pd.DataFrame:
     return pd.DataFrame(
@@ -443,7 +439,6 @@ def fields_to_df(spec: SchemaSpec) -> pd.DataFrame:
                 "label": f.label,
                 "question": f.question,
                 "shape": f.shape.value,
-                "nodes": f" {NODE_SEP} ".join(f.nodes),
                 "max_items": f.max_items,
                 "guidance": f.guidance,
                 "anchors": f.anchors,
@@ -456,7 +451,12 @@ def fields_to_df(spec: SchemaSpec) -> pd.DataFrame:
     )
 
 
-def df_to_fields(df: pd.DataFrame) -> tuple[list[FieldSpec], list[str]]:
+def df_to_fields(
+    df: pd.DataFrame, previous: SchemaSpec | None = None
+) -> tuple[list[FieldSpec], list[str]]:
+    # Legacy node assignments are not editable in the grid, so they are carried over
+    # rather than silently dropped from a schema that still relies on them.
+    prior_nodes = {f.key: f.nodes for f in (previous.fields if previous else [])}
     fields, errors = [], []
     for i, r in df.iterrows():
         key = str(r.get("key", "") or "").strip()
@@ -469,11 +469,7 @@ def df_to_fields(df: pd.DataFrame) -> tuple[list[FieldSpec], list[str]]:
                     label=str(r.get("label") or key).strip(),
                     question=str(r.get("question") or "").strip(),
                     shape=FieldShape(str(r.get("shape") or "prose").strip()),
-                    nodes=[
-                        n.strip()
-                        for n in str(r.get("nodes") or "").split(NODE_SEP)
-                        if n.strip()
-                    ],
+                    nodes=prior_nodes.get(key, []),
                     max_items=int(r.get("max_items") or 10),
                     guidance=str(r.get("guidance") or "").strip(),
                     fill_from=FillFrom(str(r.get("source") or "extract").strip()),
@@ -490,6 +486,69 @@ def df_to_fields(df: pd.DataFrame) -> tuple[list[FieldSpec], list[str]]:
         except Exception as e:
             errors.append(f"Row {i + 1} ({key}): {e}")
     return fields, errors
+
+
+def _chips(labels: list[str]) -> str:
+    return (
+        "".join(
+            f'<span style="display:inline-block;background:#2d3748;color:#e2e8f0;'
+            f"border-radius:4px;padding:1px 8px;margin:2px 4px 2px 0;"
+            f'font-size:0.85em;white-space:nowrap;">{lbl}</span>'
+            for lbl in labels
+        )
+        or '<span style="color:#718096;font-style:italic;">(none)</span>'
+    )
+
+
+def render_routing_view(spec: SchemaSpec) -> None:
+    """Show which questions each source is asked."""
+    by_key = {f.key: f for f in spec.fields}
+
+    if spec.has_url_map:
+        mapped = spec.url_map()
+        with st.expander(f"Source → field routing ({len(mapped)} URLs)"):
+            st.caption(
+                "One row per distinct URL. A URL listed under several fields is still "
+                "fetched once and extracted once, answering only these questions."
+            )
+            for url, keys in mapped.items():
+                labels = [by_key[k].label for k in keys if k in by_key]
+                st.markdown(
+                    f'<div style="margin:6px 0;">'
+                    f'<div style="font-weight:600;color:#e2e8f0;font-size:0.85em;'
+                    f'word-break:break-all;">{url}</div>{_chips(labels)}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            custom = spec.custom_input_fields()
+            if custom:
+                st.markdown("**Analyst-supplied evidence (no fetch)**")
+                st.markdown(_chips([f.label for f in custom]), unsafe_allow_html=True)
+
+        unmapped = [
+            f.label
+            for f in spec.fields
+            if f.fill_from == FillFrom.EXTRACT
+            and not f.source_urls
+            and not f.custom_input.strip()
+        ]
+        if unmapped:
+            st.warning(
+                f"{len(unmapped)} field(s) have no source and will stay empty: "
+                + ", ".join(unmapped[:8])
+                + ("…" if len(unmapped) > 8 else "")
+            )
+        return
+
+    with st.expander("Node → field routing (legacy)"):
+        for node in spec.all_nodes():
+            st.markdown(
+                f'<div style="margin:4px 0;">'
+                f'<span style="font-weight:600;color:#e2e8f0;margin-right:8px;">'
+                f"{node}</span>"
+                f"{_chips([f.label for f in spec.fields_for_node(node)])}</div>",
+                unsafe_allow_html=True,
+            )
 
 
 def render_brief_import() -> None:
@@ -545,8 +604,8 @@ def tab_schema() -> None:
     st.subheader("Output schema")
     st.caption(
         "The deliverable's shape lives here as data, not in code. Each row is one output "
-        "column: the question that defines it, the shape of the answer, and which input "
-        "nodes are allowed to answer it."
+        "column: the question that defines it, the shape of the answer, and the source "
+        "URLs or pasted evidence it is answered from."
     )
 
     files = list_schemas()
@@ -606,14 +665,20 @@ def tab_schema() -> None:
         key=f"spec_listout_{n}",
         help="How list fields are written into a cell.",
     )
-    st.text_area(
-        "Nodes (one per line)",
-        value="\n".join(spec.nodes),
-        key=f"spec_nodes_{n}",
-        height=90,
-        help="The Node values your input sheet uses, exactly as spelled there. One per "
-        "line, because node names often contain commas.",
-    )
+    if spec.has_url_map:
+        st.caption(
+            f"Routing: **{len(spec.url_map())} source URL(s)** mapped to field keys, "
+            "many-to-many. Each URL is fetched once and asked only its own questions."
+        )
+    else:
+        st.text_area(
+            "Nodes (one per line)",
+            value="\n".join(spec.nodes),
+            key=f"spec_nodes_{n}",
+            height=90,
+            help="Legacy routing, used only while no field has source URLs. Fill in "
+            "'source urls' below to route by key instead.",
+        )
 
     st.markdown("**Fields**")
     edited = st.data_editor(
@@ -625,7 +690,7 @@ def tab_schema() -> None:
             "section": st.column_config.TextColumn(
                 "section (H2)",
                 help="The article heading this field sits under. Presentational only — "
-                "routing still happens through nodes.",
+                "routing happens through source urls.",
                 width="small",
             ),
             "key": st.column_config.TextColumn(
@@ -645,12 +710,6 @@ def tab_schema() -> None:
             "shape": st.column_config.SelectboxColumn(
                 "shape", options=[s.value for s in FieldShape], width="small"
             ),
-            "nodes": st.column_config.TextColumn(
-                "nodes",
-                help="Separate multiple nodes with a pipe ( | ), since node "
-                "names often contain commas. Empty means every node may "
-                "answer this field.",
-            ),
             "max_items": st.column_config.NumberColumn(
                 "max", min_value=1, max_value=50, width="small"
             ),
@@ -664,14 +723,15 @@ def tab_schema() -> None:
             "custom_input": st.column_config.TextColumn(
                 "custom input",
                 width="large",
-                help="Evidence you supplied by hand (a forum reply, a note from a "
-                "call). Treated as quotable evidence alongside the page text.",
+                help="Evidence you pasted by hand (a forum reply, a note from a call). "
+                "Becomes an extra source for this field, like one more URL — no "
+                "scraping needed.",
             ),
             "source_urls": st.column_config.TextColumn(
                 "source urls",
                 width="large",
-                help="URLs the brief nominated for this field, one per line. Use "
-                "'Seed input from schema' in the Input tab to turn them into rows.",
+                help="URLs this field is answered from, one per line. The same URL may "
+                "appear under several fields; it is still fetched only once.",
             ),
             "source": st.column_config.SelectboxColumn(
                 "source",
@@ -685,12 +745,13 @@ def tab_schema() -> None:
 
     c1, c2, c3 = st.columns([1, 1, 2])
     if c1.button("Apply changes", type="primary", width=STRETCH, key="schema_apply"):
-        fields, errors = df_to_fields(edited)
+        fields, errors = df_to_fields(edited, spec)
         if errors:
             for e in errors:
                 st.error(e)
         else:
             try:
+                raw_nodes = st.session_state.get(f"spec_nodes_{n}")
                 new_spec = SchemaSpec(
                     name=st.session_state[f"spec_name_{n}"].strip() or spec.name,
                     entity_label=(
@@ -698,11 +759,11 @@ def tab_schema() -> None:
                     ),
                     description=spec.description,
                     scenario=Scenario(st.session_state[f"spec_scenario_{n}"]),
-                    nodes=[
-                        line.strip()
-                        for line in st.session_state[f"spec_nodes_{n}"].splitlines()
-                        if line.strip()
-                    ],
+                    nodes=(
+                        [ln.strip() for ln in raw_nodes.splitlines() if ln.strip()]
+                        if raw_nodes is not None
+                        else spec.nodes
+                    ),
                     list_output=ListOutput(st.session_state[f"spec_listout_{n}"]),
                     fields=fields,
                 )
@@ -726,24 +787,7 @@ def tab_schema() -> None:
     else:
         c3.success("Schema looks consistent.")
 
-    with st.expander("Node → field routing"):
-        for node in spec.all_nodes():
-            fs = spec.fields_for_node(node)
-            labels_html = (
-                "".join(
-                    f'<span style="display:inline-block;background:#2d3748;color:#e2e8f0;'
-                    f"border-radius:4px;padding:1px 8px;margin:2px 4px 2px 0;"
-                    f'font-size:0.85em;white-space:nowrap;">{f.label}</span>'
-                    for f in fs
-                )
-                or '<span style="color:#718096;font-style:italic;">(none)</span>'
-            )
-            st.markdown(
-                f'<div style="margin:4px 0;">'
-                f'<span style="font-weight:600;color:#e2e8f0;margin-right:8px;">{node}</span>'
-                f"{labels_html}</div>",
-                unsafe_allow_html=True,
-            )
+    render_routing_view(spec)
 
     with st.expander("YAML"):
         yaml_text = spec.to_yaml_text()
@@ -776,8 +820,9 @@ def tab_schema() -> None:
 def tab_input() -> None:
     st.subheader("Reference URLs")
     st.caption(
-        "One row per URL: which product it describes and which node (section) it feeds. "
-        "Columns are matched loosely, and the URL column is detected by content."
+        "One row per URL: which product it describes and which fields it answers. "
+        "Usually you just press *Seed input from schema* — the brief already lists the "
+        "URLs. Columns are matched loosely and the URL column is detected by content."
     )
 
     spec = current_spec()
@@ -801,12 +846,14 @@ def tab_input() -> None:
     if seeded:
         if st.button(
             f"Seed input from schema ({len(seeded)} URL(s))",
+            type="primary",
             disabled=not default_product.strip(),
             key="input_seed",
-            help="Uses the 'source urls' recorded on each schema field.",
+            help="Uses the 'source urls' on each schema field. A URL listed under "
+            "several fields becomes one row answering all of them.",
         ):
             st.session_state.rows = [
-                InputRow(product=p, node=n, url=u) for p, n, u in seeded
+                InputRow(product=p, url=u, keys=k) for p, u, k in seeded
             ]
             st.session_state.input_warnings = []
             st.session_state.preflight = None
@@ -829,7 +876,12 @@ def tab_input() -> None:
             "Paste rows (tab or comma separated, with a header row)",
             height=200,
             key="input_paste",
-            placeholder="Product\tNode\tURL\nn8n\tPricing\thttps://n8n.io/pricing/",
+            placeholder=(
+                "Product\tKey\tURL\n" "n8n\tpricing_format\thttps://n8n.io/pricing/"
+            ),
+            help="A 'Key' column names the fields a URL answers; repeat the URL on "
+            "several rows, or list keys separated by commas. Without it, the schema's "
+            "own source urls decide.",
         )
         if pasted.strip():
             data, filename = pasted, "pasted.tsv"
@@ -859,16 +911,34 @@ def tab_input() -> None:
     for w in st.session_state.input_warnings:
         st.warning(w)
 
-    df = pd.DataFrame([r.model_dump() for r in rows])
+    label_of = {f.key: f.label for f in spec.fields} if spec else {}
+    df = pd.DataFrame(
+        [
+            {
+                "product": r.product,
+                "url": r.url,
+                "answers": ", ".join(label_of.get(k, k) for k in r.keys)
+                or (f"node: {r.node}" if r.node else "(routed by schema)"),
+            }
+            for r in rows
+        ]
+    )
     m1, m2, m3 = st.columns(3)
     m1.metric("URLs", len(rows))
     m2.metric("Products", df["product"].nunique())
-    m3.metric("Nodes", df["node"].nunique())
+    m3.metric("Fields covered", len({k for r in rows for k in r.keys}))
     st.dataframe(df, width=STRETCH, hide_index=True)
 
     if spec is None:
         st.warning("Load a schema to run preflight checks.")
         return
+
+    custom = spec.custom_input_fields()
+    if custom:
+        st.caption(
+            f"Plus {len(custom)} field(s) answered from custom input you pasted in the "
+            "schema — added automatically at run time, no fetch needed."
+        )
 
     st.markdown("**Preflight**")
     pf = preflight(rows, spec, build_cfg())
@@ -877,7 +947,7 @@ def tab_input() -> None:
         for p in pf["problems"]:
             st.warning(p)
     else:
-        st.success("Every schema field is fed by at least one URL.")
+        st.success("Every schema field has at least one source.")
     for n in pf["notes"]:
         st.info(n)
 
@@ -1201,7 +1271,12 @@ def tab_review() -> None:
         if not claim or not claim.found:
             continue
         any_claim = True
-        with st.expander(f"{ext.url[:95]}  ·  node: {ext.node}"):
+        src = (
+            "analyst-supplied evidence"
+            if ext.url.startswith(CUSTOM_INPUT_SCHEME)
+            else ext.url[:95]
+        )
+        with st.expander(src):
             for v in claim.values:
                 st.write(f"- {v}")
             if claim.quote:
@@ -1359,11 +1434,28 @@ def tab_runs() -> None:
         "the last stage."
     )
 
+    # The client asked where runs live: there is no account, so say so plainly and name
+    # the actual folder rather than leaving it to be guessed.
+    s = get_settings()
+    where = {
+        "files": f"JSON files in `{RUNS_DIR}`",
+        "db": f"the database `{s.resolved_url().split('://')[0]}`",
+        "both": f"JSON files in `{RUNS_DIR}` **and** the database",
+    }[s.backend]
+    st.info(
+        f"Runs are saved on the machine running this app — currently {where}. "
+        "There is no login: anything listed here survives a refresh, a browser restart "
+        "and a reboot, and is only lost if those files are deleted. Change the location "
+        "in the **Storage** tab.",
+        icon="💾",
+    )
+
     runs = _runs_index(runs_signature())
     if not runs:
-        st.info(
-            "No saved runs yet. Start one from the Run tab — each stage is saved as it "
-            "completes."
+        st.warning(
+            "No saved runs yet. A run appears here as soon as its first stage finishes, "
+            "so if you expected one, the run either never started or failed during "
+            "scraping — check the Run tab for an error."
         )
         return
 
@@ -1903,10 +1995,10 @@ def tab_help() -> None:
         pages (docs, blog posts) skip the heavy Chromium browser.  Only JS-rendered
         pages (pricing tables, SPAs) launch headless Chrome.
 
-        **2. Extract** — Each scraped page goes to the LLM with a prompt listing the
-        schema fields for that page's node.  The model returns found/not-found for every
-        field, plus a verbatim supporting quote.  Quotes are checked against the page
-        text — unverifiable ones are flagged as possible inventions.
+        **2. Extract** — Each source goes to the LLM with a prompt listing only the
+        fields that source was nominated for.  The model returns found/not-found for
+        every field, plus a verbatim supporting quote.  Quotes are checked against the
+        source text — unverifiable ones are flagged as possible inventions.
 
         **3. Reconcile** — Claims from multiple sources about the same field are merged
         into one value.  The LLM consolidates duplicates, preserves distinct points, and
@@ -1931,8 +2023,8 @@ def tab_help() -> None:
 
         | Tab | What you do |
         |---|---|
-        | **Schema** | Edit the content brief — add/remove fields, change questions, assign nodes.  Saved as YAML. |
-        | **Input** | Paste a CSV or upload a file.  One row per URL with Product, Node, and URL columns. |
+        | **Schema** | Edit the content brief — fields, questions, source URLs and pasted evidence.  Saved as YAML. |
+        | **Input** | Usually just *Seed input from schema*.  Or upload a sheet with Product, Key and URL columns. |
         | **Run** | Choose stages, see the preflight (cost + coverage), and start the pipeline. |
         | **Review** | Inspect conflicts, trace provenance, check coverage. |
         | **Export** | Download the workbook. |
@@ -1964,14 +2056,28 @@ def tab_help() -> None:
         *Custom input*).  Each sheet becomes one schema, and the scenario is taken from
         the sheet name, so import the General and Tools sheets separately.
 
-        - **H2/H3 are merged cells**, so blanks inherit from the row above.  H3 becomes
-          the column label *and* the node that routes URLs to it.
+        - **H2/H3 are merged cells**, so blanks inherit from the row above.  H2 is the
+          article section, H3 the column label.
         - **Anchors** are angles the brief insists on covering; they reach the model as
           "Must cover".
-        - **Custom input** is evidence you supplied by hand.  It is quotable evidence
-          alongside the page text, so a claim citing it still passes the quote check.
-        - **Source urls** are kept on the field, and *Seed input from schema* in the
-          Input tab turns them into rows so a run can start without building the sheet.
+        - **Custom input** is evidence you pasted by hand.  It becomes a source of its
+          own — like one more URL, but with no fetch — so its claims are merged and
+          traced exactly like a scraped page.
+        - **Source urls** decide routing.  Press *Seed input from schema* in the Input
+          tab and a run can start without building a sheet at all.
+
+        ### Routing: which source answers which field
+
+        The brief lists source URLs per key, and that mapping is **many-to-many** — one
+        key cites several URLs, and the same URL is cited by several keys.
+
+        - A URL is **fetched once and extracted once**, and is asked only the questions
+          it was listed under.  Listing one URL under five keys costs one call, not five.
+        - A URL that is **not** in the brief (pasted in by hand with no Key column) is
+          tried against every field, so nothing is silently skipped.
+        - Field-specific instructions belong in the field's own **question**, **guidance**
+          and **anchors**.  The master prompts in the Advanced tab deliberately hold only
+          rules that apply to every field.
 
         ### Storage
 
@@ -1979,6 +2085,9 @@ def tab_help() -> None:
         switches this to a **database** — a local SQLite file (`data/runs.db`) or any
         server SQLAlchemy supports — and can copy runs between backends.
 
+        - **No login.**  Runs are not tied to an account or a browser session.  They are
+          files on the machine running the app, so they survive a refresh, a browser
+          restart and a reboot.  The **Saved runs** tab prints the exact folder.
         - **Backends** — `files`, `db`, or `both`.  `both` writes to JSON and the
           database at once, so a database outage can never lose a run.
         - **Databases** — Leave the URL blank for SQLite, or use a SQLAlchemy URL for a

@@ -101,30 +101,33 @@ def build_user_prompt(
         section = f"{f.section} > " if f.section.strip() else ""
         lines.append(f"- {f.key} ({section}{f.label}) [{shape}]: {f.prompt_line()}")
 
-    # Analyst-supplied evidence is quoted material the brief attached to a field. It is
-    # evidence like any page text, so a claim may cite it -- but it is not the page, so
-    # it is fenced separately and the quote check knows about it.
-    extras = [(f, f.custom_input.strip()) for f in fields if f.custom_input.strip()]
-    if extras:
-        lines += ["", "ANALYST-SUPPLIED EVIDENCE (counts as permitted evidence):"]
-        for f, text in extras:
-            lines += [
-                f"-------- BEGIN {f.key} NOTES --------",
-                text,
-                f"-------- END {f.key} NOTES --------",
-            ]
+    # Analyst-pasted evidence arrives as its own source page, so it is labelled as such
+    # rather than being appended to every other page's prompt.
+    if page.is_custom_input:
+        lines += [
+            "",
+            "SOURCE: evidence supplied by the analyst (a quoted excerpt they collected "
+            "by hand). Treat it exactly like page text: it is permitted evidence and "
+            "quotes must come from it verbatim.",
+            "-------- BEGIN SUPPLIED EVIDENCE --------",
+            page.text,
+            "-------- END SUPPLIED EVIDENCE --------",
+        ]
+    else:
+        src = f"{page.title} <{page.url}>" if page.title else page.url
+        lines += [
+            "",
+            f"PAGE SOURCE: {src}",
+            "PAGE TEXT (the only permitted evidence):",
+            "-------- BEGIN PAGE TEXT --------",
+            page.text,
+            "-------- END PAGE TEXT --------",
+        ]
 
-    src = f"{page.title} <{page.url}>" if page.title else page.url
     lines += [
         "",
-        f"PAGE SOURCE: {src}",
-        "PAGE TEXT (the only permitted evidence):",
-        "-------- BEGIN PAGE TEXT --------",
-        page.text,
-        "-------- END PAGE TEXT --------",
-        "",
         f"Reminder: describe {product} and nothing else. Mark found=false wherever the "
-        "page is silent.",
+        "source is silent.",
     ]
     return "\n".join(lines)
 
@@ -156,10 +159,7 @@ def parse_extraction(
     data: dict, fields: list[FieldSpec], page_text: str
 ) -> dict[str, FieldClaim]:
     payload = (data or {}).get("fields") or {}
-    # Analyst notes were shown to the model as evidence, so a quote drawn from them is
-    # genuine support and must not be flagged as invented.
-    notes = " ".join(f.custom_input for f in fields if f.custom_input.strip())
-    haystack = _norm_for_match(f"{page_text}\n{notes}" if notes else page_text)
+    haystack = _norm_for_match(page_text)
     claims: dict[str, FieldClaim] = {}
 
     for f in fields:
@@ -194,8 +194,7 @@ def extract_page(
     cfg: Config,
     cache: DiskCache,
 ) -> SourceExtraction:
-    canonical, _ = spec.resolve_node(page.node)
-    fields = spec.fields_for_node(canonical)
+    fields = spec.fields_for(keys=page.keys, node=page.node, url=page.url)
 
     base = SourceExtraction(
         product=page.product, url=page.url, node=page.node, model=provider.model
@@ -204,13 +203,11 @@ def extract_page(
         base.error = page.error or "No page content"
         return base
     if not fields:
-        base.error = f"Node {page.node!r} feeds no fields in this schema"
+        base.error = "This source is not mapped to any field in the schema"
         return base
 
     system = system_prompt(spec, cfg)
-    fingerprint = make_key(
-        *[f"{f.key}|{f.shape}|{f.prompt_line()}|{f.custom_input}" for f in fields]
-    )
+    fingerprint = make_key(*[f"{f.key}|{f.shape}|{f.prompt_line()}" for f in fields])
     ck = make_key(
         "extract",
         EXTRACT_CACHE_VERSION,

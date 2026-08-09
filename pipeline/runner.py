@@ -12,7 +12,7 @@ import pandas as pd
 
 from config import Config
 from pipeline.extractor import extract_pages
-from pipeline.models import InputRow, RunState
+from pipeline.models import InputRow, RunState, custom_input_url
 from pipeline.providers import BaseProvider, Usage
 from pipeline.reconciler import reconcile, web_resolve_conflicts
 from pipeline.schema import SchemaSpec
@@ -57,11 +57,22 @@ URL_ALIASES = {
     "uri",
     "source",
     "source url",
+    "source urls",
     "page",
     "address",
     "href",
     "reference",
 }
+KEY_ALIASES = {
+    "key",
+    "keys",
+    "field key",
+    "field keys",
+    "fields",
+}
+
+# A cell may list several keys; the brief writes them one per line.
+KEY_SPLIT_RE = re.compile(r"[\n,;|]+")
 
 
 def _norm_header(h: str) -> str:
@@ -125,10 +136,12 @@ def parse_input(
         raise ValueError("Input contains no data rows.")
 
     headers = {c: _norm_header(c) for c in df.columns}
-    product_col = node_col = url_col = None
+    product_col = node_col = url_col = key_col = None
     for col, norm in headers.items():
         if url_col is None and norm in URL_ALIASES:
             url_col = col
+        elif key_col is None and norm in KEY_ALIASES:
+            key_col = col
         elif node_col is None and norm in NODE_ALIASES:
             node_col = col
         elif product_col is None and norm in PRODUCT_ALIASES:
@@ -143,15 +156,13 @@ def parse_input(
             )
         warnings.append(f"Using column {url_col!r} as the URL column.")
 
-    if node_col is None:
-        remaining = [c for c in df.columns if c not in (url_col, product_col)]
-        if remaining:
-            node_col = remaining[0]
-            warnings.append(f"Using column {node_col!r} as the Node column.")
-        else:
-            raise ValueError(
-                "No Node column found. Add a column naming the section each URL feeds."
-            )
+    # Neither Keys nor Node is required: a sheet of bare URLs is routed by the schema's
+    # own key->URL map, and failing that every field is attempted.
+    if key_col is None and node_col is None:
+        warnings.append(
+            "No Keys or Node column; each URL is routed using the schema's own source "
+            "URLs, or tried against every field if it is not listed there."
+        )
 
     if product_col is None and not default_product:
         raise ValueError(
@@ -163,8 +174,11 @@ def parse_input(
             f"No Product column; assigning every row to {default_product!r}."
         )
 
-    rows: list[InputRow] = []
-    seen: set[tuple[str, str, str]] = set()
+    # The brief lists the same URL under several keys, so rows are merged per
+    # (product, url): one fetch, one extraction call, covering every key it was
+    # nominated for.
+    merged: dict[tuple[str, str], InputRow] = {}
+    order: list[tuple[str, str]] = []
     for i, rec in df.iterrows():
         url = str(rec[url_col]).strip()
         if not url or not URL_RE.search(url):
@@ -178,20 +192,57 @@ def parse_input(
         if not product:
             warnings.append(f"Row {i + 2}: skipped, no product name.")
             continue
-        if not node:
-            warnings.append(f"Row {i + 2}: skipped, no node.")
-            continue
 
-        dedupe_key = (product.lower(), node.lower(), normalize_url(url))
-        if dedupe_key in seen:
-            warnings.append(f"Row {i + 2}: duplicate of an earlier row, skipped.")
-            continue
-        seen.add(dedupe_key)
-        rows.append(InputRow(product=product, node=node, url=url))
+        keys = (
+            [k.strip() for k in KEY_SPLIT_RE.split(str(rec[key_col])) if k.strip()]
+            if key_col
+            else []
+        )
 
+        dedupe_key = (product.lower(), normalize_url(url))
+        existing = merged.get(dedupe_key)
+        if existing is None:
+            merged[dedupe_key] = InputRow(
+                product=product, node=node, url=url, keys=keys
+            )
+            order.append(dedupe_key)
+            continue
+        for k in keys:
+            if k not in existing.keys:
+                existing.keys.append(k)
+        existing.node = existing.node or node
+
+    rows = [merged[k] for k in order]
     if not rows:
         raise ValueError("No usable rows found in the input.")
     return rows, warnings
+
+
+def custom_input_rows(spec: SchemaSpec, rows: list[InputRow]) -> list[InputRow]:
+    """One extra source per field carrying analyst-pasted evidence.
+
+    The client's brief supplies text for fields where scraping is unwanted (a Reddit
+    reply, a note from a call). Turning it into a row means it flows through extraction,
+    merging and provenance exactly like a fetched page, instead of being a special case
+    bolted onto the prompt.
+    """
+    products = sorted({r.product for r in rows}) or [""]
+    existing = {r.url for r in rows}
+    out: list[InputRow] = []
+    for f in spec.custom_input_fields():
+        url = custom_input_url(f.key)
+        if url in existing:
+            continue
+        for p in products:
+            out.append(
+                InputRow(
+                    product=p,
+                    url=url,
+                    keys=[f.key],
+                    custom_text=f.custom_input.strip(),
+                )
+            )
+    return out
 
 
 # ------------------------------------------------------------------------ preflight
@@ -203,26 +254,34 @@ def preflight(rows: list[InputRow], spec: SchemaSpec, cfg: Config) -> dict:
     notes: list[str] = []
 
     unknown: dict[str, int] = {}
-    per_node_fields: dict[str, int] = {}
+    known_keys = set(spec.field_keys)
     for r in rows:
-        canonical, warn = spec.resolve_node(r.node)
-        if warn:
-            unknown[warn] = unknown.get(warn, 0) + 1
-        fields = spec.fields_for_node(canonical)
-        per_node_fields[r.node] = len(fields)
-        if not fields:
+        # Only warn about node spelling when the row actually relies on node routing.
+        if r.node and not r.keys and not spec.has_url_map:
+            _, warn = spec.resolve_node(r.node)
+            if warn:
+                unknown[warn] = unknown.get(warn, 0) + 1
+        for k in r.keys:
+            if k not in known_keys:
+                problems.append(
+                    f"Row {r.url[:50]} names key {k!r}, which is not in this schema."
+                )
+        if not spec.fields_for(keys=r.keys, node=r.node, url=r.url):
             problems.append(
-                f"Node {r.node!r} feeds no fields, so its {r.url[:50]} will be scraped "
-                "but produce nothing."
+                f"{r.url[:50]} maps to no field, so it will be fetched but produce "
+                "nothing."
             )
     problems.extend(unknown.keys())
 
     products = sorted({r.product for r in rows})
     covered: dict[str, set[str]] = {p: set() for p in products}
     for r in rows:
-        canonical, _ = spec.resolve_node(r.node)
-        for f in spec.fields_for_node(canonical):
+        for f in spec.fields_for(keys=r.keys, node=r.node, url=r.url):
             covered[r.product].add(f.key)
+    # Custom input is injected at run time, so it counts as coverage here too.
+    custom_keys = {f.key for f in spec.custom_input_fields()}
+    for p in products:
+        covered[p] |= custom_keys
 
     extractable = {f.key for f in spec.fields if f.fill_from.value == "extract"}
     for p in products:
@@ -236,7 +295,7 @@ def preflight(rows: list[InputRow], spec: SchemaSpec, cfg: Config) -> dict:
             )
 
     est_extract_calls = sum(
-        1 for r in rows if spec.fields_for_node(spec.resolve_node(r.node)[0])
+        1 for r in rows if spec.fields_for(keys=r.keys, node=r.node, url=r.url)
     )
     fields_per_product = len(extractable)
     est_reconcile_calls = len(products) * math.ceil(
@@ -284,6 +343,7 @@ def run_pipeline(
     completed `state` runs nothing but the web conflict check.
     """
     rows = list(rows)
+    rows += custom_input_rows(spec, rows)
     if state is None:
         state = RunState(run_id=new_run_id())
     state.inputs = rows

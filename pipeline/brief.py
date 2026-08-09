@@ -5,16 +5,16 @@ The brief arrives as a spreadsheet whose columns are an article outline:
     Article - H2 | Article - H3 | Key | Prompt | Anchors (tool-specific) | Source urls |
     Custom input
 
-Two quirks drive the parsing:
+Three quirks drive the parsing:
 
 * **H2 and H3 are merged cells written once.** A blank H2 means "same as the row
   above", so both are forward-filled or every field after the first loses its section.
 * **One sheet per scenario.** The "General" sheet covers the article's subject product;
   the "Tools" sheet covers each alternative. They need different system prompts, so the
   scenario is taken from the sheet name and stored on the schema.
-
-Nodes are derived from the H3 grouping rather than declared separately: an H3 is exactly
-"a set of fields one page can answer", which is what a node is.
+* **Source urls are many-to-many.** One key lists several URLs and the same URL recurs
+  under several keys. That mapping *is* the routing: a URL is fetched once and asked
+  only the questions it was nominated for.
 """
 
 from __future__ import annotations
@@ -24,13 +24,7 @@ import re
 
 import pandas as pd
 
-from pipeline.schema import (
-    FieldShape,
-    FieldSpec,
-    Scenario,
-    SchemaSpec,
-    normalize_label,
-)
+from pipeline.schema import FieldShape, FieldSpec, Scenario, SchemaSpec
 
 COLUMN_ALIASES = {
     "section": {"article - h2", "article h2", "h2", "section"},
@@ -177,16 +171,19 @@ def parse_brief_sheet(
             label = f"{h3} — {key.replace('_', ' ')}"
         seen_labels.add(label)
 
-        urls = URL_RE.findall(cell(rec, "source_urls"))
+        # The same URL is listed under several keys and one key lists several URLs, so
+        # the key->URL map is the routing mechanism; nodes are not derived.
+        urls: list[str] = []
+        for u in URL_RE.findall(cell(rec, "source_urls")):
+            if u not in urls:
+                urls.append(u)
+
         fields.append(
             FieldSpec(
                 key=key,
                 label=label,
                 question=question,
                 shape=_guess_shape(question, key),
-                # An H3 groups the fields one page is expected to answer, which is
-                # exactly what a node routes.
-                nodes=[h3] if h3 else [],
                 max_items=10,
                 anchors=cell(rec, "anchors"),
                 custom_input=cell(rec, "custom_input"),
@@ -198,21 +195,12 @@ def parse_brief_sheet(
     if not fields:
         raise ValueError(f"Sheet {sheet!r} produced no usable fields.")
 
-    nodes: list[str] = []
-    known: set[str] = set()
-    for f in fields:
-        for n in f.nodes:
-            if normalize_label(n) not in known:
-                known.add(normalize_label(n))
-                nodes.append(n)
-
     scenario = _scenario_for(sheet)
     spec = SchemaSpec(
         name=_slug(name or sheet),
         entity_label=entity_label,
         description=f"Imported from workbook sheet {sheet!r}.",
         scenario=scenario,
-        nodes=nodes,
         fields=fields,
     )
     return spec, warnings

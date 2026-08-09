@@ -51,6 +51,20 @@ def normalize_label(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+def canonical_url(url: str) -> str:
+    """Key for matching a brief's URL against an input row's URL.
+
+    Deliberately more forgiving than the fetcher's normaliser: the same page is written
+    with and without a scheme, "www.", a trailing slash or a #fragment across a
+    hand-maintained sheet, and all of those must land on one key.
+    """
+    u = (url or "").strip().lower()
+    u = re.sub(r"^https?://", "", u)
+    u = re.sub(r"^www\.", "", u)
+    u = u.split("#", 1)[0]
+    return u.rstrip("/")
+
+
 class FieldSpec(BaseModel):
     """One column of the output dataset.
 
@@ -170,7 +184,65 @@ class SchemaSpec(BaseModel):
                     seen.append(n)
         return seen
 
-    # ---------- node resolution ----------
+    # ---------- key <-> url routing ----------
+
+    def url_map(self) -> dict[str, list[str]]:
+        """canonical url -> field keys it feeds, from the brief's own Source urls.
+
+        The brief lists URLs per key and the same URL recurs under several keys, so the
+        relationship is many-to-many. Inverting it here means one fetch and one
+        extraction call per URL covering every field that URL was nominated for.
+        """
+        out: dict[str, list[str]] = {}
+        for f in self.fields:
+            if f.fill_from != FillFrom.EXTRACT:
+                continue
+            for u in f.source_urls:
+                key_list = out.setdefault(canonical_url(u), [])
+                if f.key not in key_list:
+                    key_list.append(f.key)
+        return out
+
+    @property
+    def has_url_map(self) -> bool:
+        return any(f.source_urls for f in self.fields)
+
+    def fields_for(
+        self, keys: list[str] | None = None, node: str = "", url: str = ""
+    ) -> list[FieldSpec]:
+        """Which extractable fields one source is allowed to answer.
+
+        Precedence, most explicit first: keys named on the input row, then the brief's
+        own key->URL map, then legacy node routing, and finally every field. The last
+        case is deliberate -- an unmapped URL should be tried against everything rather
+        than silently contributing nothing.
+        """
+        candidates = [f for f in self.fields if f.fill_from == FillFrom.EXTRACT]
+
+        if keys:
+            wanted = {k.strip() for k in keys if k.strip()}
+            picked = [f for f in candidates if f.key in wanted]
+            if picked:
+                return picked
+
+        if url:
+            mapped = self.url_map().get(canonical_url(url))
+            if mapped:
+                return [f for f in candidates if f.key in set(mapped)]
+
+        if node and self.all_nodes():
+            canonical, _ = self.resolve_node(node)
+            if canonical is not None:
+                target = normalize_label(canonical)
+                return [
+                    f
+                    for f in candidates
+                    if not f.nodes or any(normalize_label(n) == target for n in f.nodes)
+                ]
+
+        return candidates
+
+    # ---------- node resolution (legacy) ----------
 
     def resolve_node(self, raw: str) -> tuple[str | None, str | None]:
         """Map a messy input node label onto a canonical one.
@@ -230,25 +302,32 @@ class SchemaSpec(BaseModel):
                 out.append(s)
         return out
 
-    def seed_rows(self, product: str) -> list[tuple[str, str, str]]:
-        """(product, node, url) triples from the URLs the brief already nominated.
+    def seed_rows(self, product: str) -> list[tuple[str, str, list[str]]]:
+        """(product, url, keys) from the brief's Source urls, one row per distinct URL.
 
-        A field with no node restriction is fed by every node, so its URLs are tagged
-        with the first node that field is eligible for -- otherwise they would have no
-        node at all and be dropped on input.
+        A URL nominated under five keys is fetched once and extracted once for all five,
+        rather than five times -- which is both cheaper and, more importantly, keeps one
+        page from producing five separately-worded answers to overlapping questions.
         """
-        default_node = self.all_nodes()[0] if self.all_nodes() else ""
-        seen: set[tuple[str, str]] = set()
-        rows: list[tuple[str, str, str]] = []
+        first_seen: dict[str, str] = {}
+        keys: dict[str, list[str]] = {}
         for f in self.fields:
-            node = f.nodes[0] if f.nodes else default_node
+            if f.fill_from != FillFrom.EXTRACT:
+                continue
             for url in f.source_urls:
                 u = url.strip()
-                if not u or (node, u) in seen:
+                if not u:
                     continue
-                seen.add((node, u))
-                rows.append((product, node, u))
-        return rows
+                ck = canonical_url(u)
+                first_seen.setdefault(ck, u)
+                bucket = keys.setdefault(ck, [])
+                if f.key not in bucket:
+                    bucket.append(f.key)
+        return [(product, first_seen[ck], keys[ck]) for ck in first_seen]
+
+    def custom_input_fields(self) -> list[FieldSpec]:
+        """Fields carrying analyst-pasted evidence, which is a source in its own right."""
+        return [f for f in self.fields if f.custom_input.strip()]
 
     # ---------- validation ----------
 
@@ -272,17 +351,32 @@ class SchemaSpec(BaseModel):
             if n > 1:
                 problems.append(f"Duplicate column label {k!r} appears {n} times.")
 
-        declared = {normalize_label(n) for n in self.nodes}
-        for f in self.fields:
-            for n in f.nodes:
-                if declared and normalize_label(n) not in declared:
+        # Node routing is legacy; a brief that maps URLs to keys has no use for it.
+        if not self.has_url_map:
+            declared = {normalize_label(n) for n in self.nodes}
+            for f in self.fields:
+                for n in f.nodes:
+                    if declared and normalize_label(n) not in declared:
+                        problems.append(
+                            f"Field {f.key!r} references node {n!r}, which is not in "
+                            "the schema's `nodes` list."
+                        )
+            for n in self.nodes:
+                if not self.fields_for_node(n):
                     problems.append(
-                        f"Field {f.key!r} references node {n!r}, which is not in the "
-                        "schema's `nodes` list."
+                        f"Node {n!r} feeds no fields, so its URLs do nothing."
                     )
-        for n in self.nodes:
-            if not self.fields_for_node(n):
-                problems.append(f"Node {n!r} feeds no fields, so its URLs do nothing.")
+        else:
+            for f in self.fields:
+                if (
+                    f.fill_from == FillFrom.EXTRACT
+                    and not f.source_urls
+                    and not f.custom_input.strip()
+                ):
+                    problems.append(
+                        f"Field {f.key!r} has no source URL and no custom input, so it "
+                        "will stay empty."
+                    )
 
         for f in self.fields:
             if not f.question.strip():
