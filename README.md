@@ -5,7 +5,7 @@ product — with every claim traceable back to the page it came from.
 
 ```mermaid
 flowchart LR
-    A["📄 <b>Input</b><br/>CSV / paste URLs + nodes"] --> B["🔍 <b>Preflight</b><br/>estimate cost & coverage"]
+    A["📄 <b>Brief</b><br/>xlsx → schema (keys + source URLs)"] --> B["🔍 <b>Preflight</b><br/>estimate cost & coverage"]
     B --> C["🌐 <b>Scrape</b><br/>static pre-check → Chromium if needed"]
     C --> D["🤖 <b>Extract</b><br/>LLM finds claims + verbatim quotes"]
     D --> E["🔗 <b>Reconcile</b><br/>merge claims, flag conflicts"]
@@ -29,7 +29,9 @@ into the sidebar at runtime.
 
 ```powershell
 .\.venv\Scripts\streamlit.exe run app.py
-```### Docker
+```
+
+### Docker
 
 ```powershell
 copy .env.example .env          # fill in your API keys
@@ -48,7 +50,22 @@ across rebuilds.
    downloaded on demand (~130 MB) and cached across reruns.  Without it, the app
    falls back to static HTTP extraction (works for most pages, misses JS-only content).
 
-The `packages.txt` file installs Chromium's system dependencies automatically.## Model providers
+The `packages.txt` file installs Chromium's system dependencies automatically.
+
+## Quick start
+
+The content brief already lists the URLs, so a run needs almost no setup:
+
+1. **Schema** → *Import a brief workbook* → pick a sheet → **Import sheet** → **Save to
+   disk**. The *General* and *Tools* sheets become separate schemas — they are written in
+   different registers and use different system prompts.
+2. **Input** → enter the product name → **Seed input from schema**. The URL list is built
+   from the brief's own *Source urls*; there is no sheet to prepare.
+3. **Run** → read the preflight (calls, rough cost, any field with no source) →
+   **Start run**.
+4. **Review** the conflicts, then **Export** the workbook.
+
+## Model providers
 
 | Provider | JSON guarantee | Suggested models |
 |---|---|---|
@@ -90,41 +107,79 @@ current rates before committing to a provider on cost grounds.
 
 The shape of the deliverable lives in `schemas/*.yaml`, not in Python. A content brief
 becomes a schema file; a new brief or client never requires a code change. Each field
-declares the question that defines it, the shape of the answer, and which input nodes are
-allowed to answer it.
+declares the question that defines it, the shape of the answer, and the sources it is
+answered from.
 
 ```yaml
 - key: pricing_starting_from
   label: Pricing (Starting from)          # exact spreadsheet header
+  section: Pricing                        # article H2, presentational
   question: What is the minimum price one can pay to use it meaningfully?
   guidance: Give the lowest recurring paid price with currency and period.
+  anchors: Mention the free tier and what it limits.
   shape: short_text                       # short_text | list | prose
-  nodes: [Pricing]                        # only Pricing URLs may answer this
+  source_urls:                            # the pages that answer this field
+    - https://zapier.com/pricing
+    - https://tech-insider.org/n8n-vs-zapier-2026/
+  custom_input: ""                        # evidence pasted by hand, if any
 ```
 
-- `nodes: []` (omitted) means **every** node may answer the field.
+- `source_urls` is the routing mechanism, and it is **many-to-many**: one field cites
+  several URLs, and the same URL is cited by several fields.
+- `anchors` are angles the brief insists on covering; they reach the model as
+  "Must cover". Field-specific rules belong here (or in `question` / `guidance`), not in
+  the master prompts.
+- `custom_input` is evidence you paste yourself — a forum reply, a note from a call. It
+  becomes a source in its own right, with no fetch, and its claims are merged and traced
+  like any page.
 - `fill_from: entity` copies the product name from the input sheet instead of spending an
-  LLM call — used for the "Alternative name" column.
+  LLM call.
 - `shape` drives both the JSON schema sent to the model and how the cell is rendered.
 
 Edit schemas in the **Schema** tab (grid or raw YAML) and save to disk. The tab lints for
-duplicate keys, fields pointing at nonexistent nodes, and nodes that feed nothing.
+duplicate keys and labels, and for fields that have no source at all and would therefore
+stay empty.
+
+### Importing the brief
+
+The Schema tab reads the client's data-structure workbook directly:
+
+| Article - H2 | Article - H3 | Key | Prompt | Anchors | Source urls | Custom input |
+|---|---|---|---|---|---|---|
+
+H2 and H3 are merged cells in the original, so blanks inherit from the row above. Each
+sheet becomes one schema and the **scenario** is taken from the sheet name — a sheet
+named `… Tools` gets the tools prompts, anything else gets the general ones.
+
+### Routing: which source answers which field
+
+A URL is **fetched once and extracted once**, and is asked only the questions it was
+listed under. Listing one URL under five keys costs one call, not five — in the sample
+brief this collapses 13 listed URLs into 10 fetches, and 11 into 7 for the tools sheet.
+
+A URL that is not in the brief (pasted by hand with no `Key` column) is tried against
+every field, so nothing is silently skipped.
 
 ## Input format
 
-One row per URL. Column names are matched loosely and the URL column is detected by
+Usually you do not write one: **Seed input from schema** builds it from the brief. When
+you do supply a sheet, column names are matched loosely and the URL column is detected by
 content, so pasting from a spreadsheet works.
 
-| Product | Node | URL |
+| Product | Key | URL |
 |---|---|---|
-| n8n | Strengths, limitations, best for | https://… |
-| n8n | Pricing | https://n8n.io/pricing/ |
-| Zapier | Pricing | https://zapier.com/pricing |
+| Zapier | tool_strengths | https://… |
+| Zapier | tool_limitations | https://… |
+| Zapier | tool_prising_minimum_cost | https://zapier.com/pricing |
 
-`Product` is optional — supply a default in the UI if your sheet omits it. Node values
-must match the schema's nodes (matching is case- and punctuation-insensitive, and close
-typos are corrected with a warning). Duplicate rows and URLs differing only by `#fragment`
-are collapsed automatically. See `sample_input.csv`.
+- `Key` names the fields a URL answers. Repeat the URL on several rows, or list several
+  keys in one cell separated by commas. Rows sharing a URL are merged into one fetch.
+- `Key` is optional. Without it the schema's own `source_urls` decide, and a URL that
+  appears nowhere in the schema is tried against every field.
+- `Product` is optional — supply a default in the UI if your sheet omits it.
+- A legacy `Node` column still works for older schemas that route by node.
+- URLs differing only by scheme, `www.`, a trailing slash or a `#fragment` are treated as
+  the same page.
 
 ## Why it is built this way
 
@@ -145,6 +200,22 @@ comparisons, so the dominant accuracy risk is attributing the competitor's trait
 product. The extraction prompt names the subject repeatedly and forbids describing
 anything else.
 
+**One fetch per URL, asked only its own questions.** The brief cites the same page under
+several keys, and the naive reading of that is one extraction call per (key, URL) pair.
+That is not just more expensive — it makes one page produce several separately-worded
+answers to overlapping questions, which then have to be merged back together. Inverting
+the map instead means a page is read once and answers all of its keys in a single call.
+
+**Rules live at the level they apply to.** Master prompts hold only what is true for
+every field; anything specific to one column goes in that field's question, guidance or
+anchors. A rule about quoting prices in a master prompt is dead weight on the fifteen
+fields that are not about pricing, and it cannot be changed without affecting them.
+
+**Pasted evidence is a source, not a prompt fragment.** Analyst-supplied text flows
+through the same models as a fetched page, so it is merged, cited and quote-checked
+identically — rather than being appended to every prompt, where it would leak into
+unrelated fields and could not be traced.
+
 **Provenance over convenience.** Extraction runs per source page, not per product, so
 every claim keeps its URL. Each claim must carry a verbatim supporting quote, which is
 then checked against the page text; an unverifiable quote is flagged in the UI and in the
@@ -163,14 +234,35 @@ on disk, keyed on everything that could change the result (URL, model, temperatu
 the prompt text itself). Tuning a question re-runs only the affected fields. Re-running an
 unchanged pipeline costs nothing.
 
-**Nothing is lost on refresh.** Every stage writes the full run to `runs/*.json`. Reopen
-any past run from the **Saved runs** tab.
+**Nothing is lost on refresh.** Every stage writes the full run to `runs/*.json`. There
+is no login and nothing is tied to the browser session: runs survive a refresh, a browser
+restart and a reboot, and are only lost if those files are deleted. Reopen any past run
+from the **Saved runs** tab, which prints the exact folder in use.
+
+## System prompts and scenarios
+
+An alternatives article is written in two registers, so the master prompts come in two
+sets and each schema declares which one it uses:
+
+| Scenario | Covers | Emphasis |
+|---|---|---|
+| `general` | the article's subject product — history, what the platform is, who uses it, where it falls short | plain, checkable narrative |
+| `tools` | each alternative it is compared against | never attributing a competitor's traits to the subject; never restating a figure loosely |
+
+Each scenario has a prompt for all three LLM stages — extraction, merge and web check —
+edited in the **Advanced** tab. **Save prompts** writes them to `prompts.json`;
+**Use without saving** applies them to the current session only, which is the cheap way
+to trial a wording. Defaults live in `pipeline/prompts.py`, and a stage left unedited
+keeps following the default rather than freezing a copy of it.
+
+Prompts are part of every cache key, so an edit correctly misses the cache and re-runs;
+unchanged fields still cost nothing.
 
 ## Running
 
 The **Run** tab shows a preflight before spending anything: how many calls, a rough cost,
-and — importantly — which schema fields no URL can answer. Those cells will be blank, and
-it is better to know first.
+and — importantly — which schema fields have no source at all. Those cells will be blank,
+and it is better to know first.
 
 Stage options let you re-extract without re-fetching, or re-merge without re-extracting.
 
@@ -185,20 +277,23 @@ The workbook has seven sheets:
 | QA coverage | Fill rate, empty fields, conflicts, single-source fields per product. |
 | Provenance | Every cell with its contributing URLs and merge method. |
 | Claims | Every individual claim with its quote and verification status. |
-| Pages | Fetch log: method used, character counts, failures. |
-| Brief | The schema itself, as documentation. |
+| Pages | Fetch log: method used, character counts, failures. Pasted evidence appears with method `custom-input`. |
+| Brief | The schema itself, as documentation — including each field's source URLs, anchors and custom input. |
 
 Review single-source and conflicting fields first — that is where errors concentrate.
 
 ## Layout
 
 ```
-app.py                  Streamlit UI (8 tabs, includes Storage and Help)
+app.py                  Streamlit UI (9 tabs, includes Advanced, Storage and Help)
 jobs.py                 background job + pollable progress bus
 config.py               settings, resolved from .env then sidebar
 schemas/*.yaml          output schemas (the content briefs)
+prompts.json            edited system prompts (git-ignored; defaults live in code)
 pipeline/
-  schema.py             FieldSpec / SchemaSpec, node resolution, linting
+  schema.py             FieldSpec / SchemaSpec, key->URL routing, linting
+  brief.py              imports the client's data-structure workbook into a schema
+  prompts.py            master system prompts, per scenario, with saved overrides
   models.py             pydantic domain models
   scraper.py            crawl4ai + static pre-check, concurrent
   providers.py          OpenAI / Anthropic / DeepSeek / Ollama

@@ -1989,11 +1989,28 @@ def tab_help() -> None:
         This tool turns reference URLs into a **structured comparison dataset** —
         one row per product, with every claim traceable back to the page it came from.
 
+        ### Start here
+
+        The normal path is four clicks, because the brief already contains the URLs:
+
+        1. **Schema** → *Import a brief workbook* → pick a sheet → **Import sheet**.
+           The General and Tools sheets become separate schemas; import them one at a
+           time.  Press **Save to disk** to keep it.
+        2. **Input** → type the product name → **Seed input from schema**.  This builds
+           the URL list from the brief's own *Source urls*, so there is no sheet to
+           prepare.
+        3. **Run** → check the preflight (calls, rough cost, any field with no source)
+           → **Start run**.
+        4. **Review** the conflicts, then **Export** the workbook.
+
+        Everything else on this page is detail you only need when something looks wrong.
+
         ### The pipeline (5 stages)
 
         **1. Scrape** — Fetch every URL.  A fast static HTTP check runs first; most
         pages (docs, blog posts) skip the heavy Chromium browser.  Only JS-rendered
-        pages (pricing tables, SPAs) launch headless Chrome.
+        pages (pricing tables, SPAs) launch headless Chrome.  Evidence you pasted as
+        *custom input* is already text, so it skips this stage entirely.
 
         **2. Extract** — Each source goes to the LLM with a prompt listing only the
         fields that source was nominated for.  The model returns found/not-found for
@@ -2140,6 +2157,13 @@ def tab_help() -> None:
         - **Tune prompts before spending.**  Change a field's question or guidance in the
           Schema tab, re-run extraction only, and the cache ensures only changed fields
           re-run.
+        - **Put field rules on the field.**  If only one column needs a rule (how to
+          quote a price, which licence to name), write it in that field's *question*,
+          *guidance* or *anchors* — not in the master prompt, which every field sees.
+        - **Paste evidence you don't want scraped.**  A Reddit reply or a note from a
+          call goes in the field's *custom input* and is treated as a source of its own.
+        - **A field with no source stays empty.**  The Schema tab warns about these
+          before you spend anything; give the field a URL or some custom input.
         - **Review conflicts first.**  Fields marked `[CONFLICT]` are where errors
           concentrate — two sources gave incompatible facts.
         - **Let the web settle stale figures.**  Pricing and integration counts are the
