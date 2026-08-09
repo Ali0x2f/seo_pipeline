@@ -18,13 +18,17 @@ from pydantic import BaseModel, Field, field_validator
 
 from config import SCHEMA_DIR
 
+# Re-exported: a schema declares its scenario, but the scenario's meaning lives with the
+# prompts it selects. One enum, so a value can never drift between the two modules.
+from pipeline.prompts import Scenario  # noqa: F401
+
 KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 class FieldShape(str, Enum):
-    SHORT_TEXT = "short_text"   # a phrase: "$20/mo", "Freemium + open-source"
-    LIST = "list"               # discrete points, deduped and merged across sources
-    PROSE = "prose"             # a paragraph or two of explanation
+    SHORT_TEXT = "short_text"  # a phrase: "$20/mo", "Freemium + open-source"
+    LIST = "list"  # discrete points, deduped and merged across sources
+    PROSE = "prose"  # a paragraph or two of explanation
 
 
 class ListOutput(str, Enum):
@@ -34,8 +38,8 @@ class ListOutput(str, Enum):
 
 
 class FillFrom(str, Enum):
-    EXTRACT = "extract"   # ask the LLM to find it in the source pages
-    ENTITY = "entity"     # copy the product/entity name from the input sheet
+    EXTRACT = "extract"  # ask the LLM to find it in the source pages
+    ENTITY = "entity"  # copy the product/entity name from the input sheet
 
 
 def normalize_label(text: str) -> str:
@@ -48,16 +52,32 @@ def normalize_label(text: str) -> str:
 
 
 class FieldSpec(BaseModel):
-    """One column of the output dataset."""
+    """One column of the output dataset.
+
+    The brief is authored as an article outline, so a field also carries where it sits
+    in that outline (`section` = H2, `label` = H3) and the research material the analyst
+    already gathered for it (`anchors`, `custom_input`, `source_urls`).
+    """
 
     key: str
     label: str
     question: str
     shape: FieldShape = FieldShape.PROSE
-    nodes: list[str] = Field(default_factory=list)   # empty => fed by every node
+    nodes: list[str] = Field(default_factory=list)  # empty => fed by every node
     max_items: int = 10
     guidance: str = ""
     fill_from: FillFrom = FillFrom.EXTRACT
+
+    # Article outline position. `section` is the H2 the field belongs to.
+    section: str = ""
+    # Points the model must not miss for this field. Unlike `guidance` (which shapes the
+    # answer) an anchor is a specific angle the brief insists on covering.
+    anchors: str = ""
+    # Evidence the analyst supplied by hand -- a quoted forum reply, a note from a call.
+    # Treated as a source page in its own right, so claims can cite it.
+    custom_input: str = ""
+    # URLs the brief already nominated for this field. Used to seed the input sheet.
+    source_urls: list[str] = Field(default_factory=list)
 
     @field_validator("key")
     @classmethod
@@ -78,6 +98,8 @@ class FieldSpec(BaseModel):
         bits = [self.question.strip()]
         if self.guidance.strip():
             bits.append(self.guidance.strip())
+        if self.anchors.strip():
+            bits.append(f"Must cover: {self.anchors.strip()}")
         if self.is_list:
             bits.append(f"Return up to {self.max_items} distinct points.")
         elif self.shape == FieldShape.SHORT_TEXT:
@@ -115,6 +137,8 @@ class SchemaSpec(BaseModel):
     version: int = 1
     entity_label: str = "Product"
     description: str = ""
+    # Picks the system-prompt family used for every LLM stage of a run on this schema.
+    scenario: Scenario = Scenario.GENERAL
     nodes: list[str] = Field(default_factory=list)
     list_output: ListOutput = ListOutput.SEMICOLON
     fields: list[FieldSpec] = Field(default_factory=list)
@@ -192,6 +216,40 @@ class SchemaSpec(BaseModel):
     def entity_fields(self) -> list[FieldSpec]:
         return [f for f in self.fields if f.fill_from == FillFrom.ENTITY]
 
+    @property
+    def sections(self) -> list[str]:
+        """H2 headings in the order the brief lists them.
+
+        The tools brief numbers its H2s per alternative ("1. Zapier"), so a section is
+        presentational only -- routing still happens through nodes.
+        """
+        out: list[str] = []
+        for f in self.fields:
+            s = f.section.strip()
+            if s and s not in out:
+                out.append(s)
+        return out
+
+    def seed_rows(self, product: str) -> list[tuple[str, str, str]]:
+        """(product, node, url) triples from the URLs the brief already nominated.
+
+        A field with no node restriction is fed by every node, so its URLs are tagged
+        with the first node that field is eligible for -- otherwise they would have no
+        node at all and be dropped on input.
+        """
+        default_node = self.all_nodes()[0] if self.all_nodes() else ""
+        seen: set[tuple[str, str]] = set()
+        rows: list[tuple[str, str, str]] = []
+        for f in self.fields:
+            node = f.nodes[0] if f.nodes else default_node
+            for url in f.source_urls:
+                u = url.strip()
+                if not u or (node, u) in seen:
+                    continue
+                seen.add((node, u))
+                rows.append((product, node, u))
+        return rows
+
     # ---------- validation ----------
 
     def lint(self) -> list[str]:
@@ -246,6 +304,19 @@ class SchemaSpec(BaseModel):
 
     def to_yaml_text(self) -> str:
         data = self.model_dump(mode="json", exclude_defaults=False)
+        # Fields carry several optional attributes that are blank far more often than
+        # not; emitting them all buries the brief in noise.
+        for f in data.get("fields", []):
+            for k in (
+                "nodes",
+                "guidance",
+                "section",
+                "anchors",
+                "custom_input",
+                "source_urls",
+            ):
+                if not f.get(k):
+                    f.pop(k, None)
         return yaml.safe_dump(data, sort_keys=False, allow_unicode=True, width=100)
 
     def save(self, path: str | Path) -> Path:

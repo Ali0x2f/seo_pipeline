@@ -5,10 +5,12 @@ Submodules are imported explicitly by callers; nothing heavy is pulled in here s
 """
 
 __all__ = [
+    "brief",
     "cache",
     "exporter",
     "extractor",
     "models",
+    "prompts",
     "reconciler",
     "runner",
     "scraper",

@@ -24,6 +24,9 @@ for _d in (SCHEMA_DIR, CACHE_DIR, RUNS_DIR, OUTPUT_DIR, DATA_DIR):
 # the UI can change it without rewriting a file the user hand-edits.
 STORAGE_SETTINGS_FILE = ROOT / "storage.json"
 
+# Edited system prompts, per scenario. Same reasoning as above: the UI owns this file.
+PROMPTS_FILE = ROOT / "prompts.json"
+
 DEFAULT_SQLITE_PATH = DATA_DIR / "runs.db"
 
 # files | db | both. "both" keeps writing JSON while a database is being trialled.
@@ -79,6 +82,16 @@ class Config:
     # --- Behaviour ---
     use_cache: bool = os.getenv("USE_CACHE", "1") not in ("0", "false", "False")
     reconcile_batch_size: int = _env_int("RECONCILE_BATCH_SIZE", 6)
+
+    # --- Prompts ---
+    # "general" writes about the article's subject product; "tools" profiles each
+    # alternative it is compared against. A schema declares which one it belongs to;
+    # this is the fallback for schemas that do not.
+    scenario: str = os.getenv("PROMPT_SCENARIO", "general")
+    # Unsaved edits from the Advanced tab. Empty means "use the saved/default prompt".
+    extract_prompt_override: str = ""
+    merge_prompt_override: str = ""
+    web_prompt_override: str = ""
 
     # --- Web conflict resolution ---
     # Off by default: it costs a per-search fee on top of tokens, and only OpenAI and

@@ -16,6 +16,9 @@ output/*.json
 # run database (may hold scraped page text) and backend choice
 data/
 storage.json
+
+# locally edited system prompts (defaults live in pipeline/prompts.py)
+prompts.json
 *.db
 *.db-wal
 *.db-shm

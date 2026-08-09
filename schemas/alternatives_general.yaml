@@ -1,0 +1,178 @@
+name: alternatives_general
+version: 1
+entity_label: Product
+description: Imported from workbook sheet 'Data structure v 1.2 General'.
+scenario: general
+nodes:
+- Brief company history
+- The platform
+- What the product does
+- Who is n8n for?
+- Most common workflows to automate with n8n
+- For individual builders
+- For teams and companies
+list_output: semicolon
+fields:
+- key: company_history
+  label: Brief company history
+  question: Capture key events in the lifecycle of the company from the idea to incorporation, to growth
+    and till the current state (mid 2026)
+  shape: list
+  nodes:
+  - Brief company history
+  max_items: 10
+  fill_from: extract
+  section: What is n8n?
+  source_urls:
+  - https://en.wikipedia.org/wiki/N8n
+- key: platform
+  label: The platform
+  question: Cature key attributes and constituents of a platform as a whole. If the platform includes
+    multiple products, list them with a one-sentence description for each product (maximum 5 products).
+    If it's just one product, describe it in a few sentences.
+  shape: list
+  nodes:
+  - The platform
+  max_items: 10
+  fill_from: extract
+  section: What is n8n?
+  anchors: Licencing. Mention fair-code, briefly explain what fair code is in plain english)
+  source_urls:
+  - https://github.com/n8n-io/n8n
+  - https://www.hostinger.com/tutorials/what-is-n8n/
+- key: what_it_does
+  label: What the product does
+  question: 'Explain in plain english what the product does: what it allows users to do or achieve, at
+    the core level. If there are multiple products, do it for each product.'
+  shape: prose
+  nodes:
+  - What the product does
+  max_items: 10
+  fill_from: extract
+  section: What is n8n?
+  custom_input: 'API connects apps and makes them talk to each other.
+
+
+    n8n is a platform where you can take apps like instagram, ChatGPT, gmail, google sheets etc. And have
+    them talk to each other and make them do things in sequence.
+
+
+    Example: I set up a workflow automation that says:
+
+
+    When my Gmail inbox gets an email, start this workflow -
+
+
+    send that email to ChatGPT to analyze and make a response.
+
+
+    Log that response in google sheets for record keeping
+
+
+    Use the response created by ChatGPT and send a reply.'
+  source_urls:
+  - https://www.hostinger.com/tutorials/what-is-n8n/
+- key: individual_user
+  label: Who is n8n for?
+  question: Extract key information about how individual users, prosumers or hobby users use it as opposed
+    to companies, organisations, or teams. If there's data on what kinds of individual users mostly use
+    the product, describe them and their key attributes which make them a great fit for the product.
+  shape: prose
+  nodes:
+  - Who is n8n for?
+  max_items: 10
+  fill_from: extract
+  section: What is n8n used for? (best use cases)
+  source_urls:
+  - https://www.haktansuren.com/why-n8n-not-for-enterprise/
+- key: corporate_user
+  label: Who is n8n for? — corporate user
+  question: Extract key information about how companies, organisations, or teams use the product as opposed
+    to individual users, prosumers or hobby users. If there's data on what kinds of corporate users, companies,
+    or teams mostly use the product, describe them and their key attributes which make them a great fit
+    for the product.
+  shape: prose
+  nodes:
+  - Who is n8n for?
+  max_items: 10
+  fill_from: extract
+  section: What is n8n used for? (best use cases)
+  source_urls:
+  - https://www.haktansuren.com/why-n8n-not-for-enterprise/
+- key: kinds_of_automations
+  label: Most common workflows to automate with n8n
+  question: Povide an overview of key categories, or types of workflows that the product allowt to automate.
+    Don't anchor on specific examples here, capture the key dimentions.
+  shape: list
+  nodes:
+  - Most common workflows to automate with n8n
+  max_items: 10
+  fill_from: extract
+  section: What is n8n used for? (best use cases)
+  anchors: The key advantage of n8n is breadth of kinds of automations one can build. It has more than
+    10000 community-built workflows as of now. People lots of "pocket-size" workflows that require taking
+    data from one popular app and feeding or inputing it into the other app.
+  source_urls:
+  - https://n8n.io/workflows/
+  - https://medium.com/@mustaphaliaichi/what-are-people-actually-building-in-n8n-i-scraped-over-6-000-workflows-to-find-out-59eb8e34c317
+- key: automation_examples
+  label: Most common workflows to automate with n8n — automation examples
+  question: Capture most prominent examples of automations that both teams and individuals build with
+    the product. Provide key details, be concrete here. Mention if it's a corporate/enterprise use-cases
+    or individual/hobby use-case for each example. Not more then 3 examples for each bucket.
+  shape: list
+  nodes:
+  - Most common workflows to automate with n8n
+  max_items: 10
+  fill_from: extract
+  section: What is n8n used for? (best use cases)
+  custom_input: 'I had a extreme wide range of tasks...
+
+
+    Backing up configs of various stuff via api
+
+
+    Posting to my social media accounts
+
+
+    Making generic reply/joke bots
+
+
+    It was kinda easier to run api requests and just test stuff this way imo
+
+
+    I even used it update my docs site to pull the latest softwares i was running on my server in a neat
+    display.
+
+
+    I kinda stopped using it but i plan to run it again honestly... lots have changed since then.'
+  source_urls:
+  - https://n8n.io/workflows/
+  - https://www.reddit.com/r/selfhosted/comments/1hwd6w7/those_who_use_n8n_what_do_you_use_it_for_list/
+  - https://www.reddit.com/r/n8n/comments/1m5ip5g/what_are_your_personal_n8n_automations_that/
+- key: individual_limitations
+  label: For individual builders
+  question: Extract key information on the limitations, drawbacks, or disadvantages for individual users,
+    prosumers or hobby users use it as opposed to companies, organisations, or teams.
+  shape: list
+  nodes:
+  - For individual builders
+  max_items: 10
+  fill_from: extract
+  section: Why consider alternatives? (n8n limitations)
+  source_urls:
+  - https://dev.to/alifar/the-real-limits-of-n8n-free-automation-what-you-need-to-know-before-shipping-to-production-59o6
+  - https://expresstech.io/the-real-cost-of-self-hosting-n8n-in-2026/
+- key: corporate_limitations
+  label: For teams and companies
+  question: Extract key information on the limitations, drawbacks, or disadvantages for companies, organisations,
+    or teams use the product as opposed to individual users, prosumers or hobby users.
+  shape: list
+  nodes:
+  - For teams and companies
+  max_items: 10
+  fill_from: extract
+  section: Why consider alternatives? (n8n limitations)
+  source_urls:
+  - https://www.haktansuren.com/why-n8n-not-for-enterprise/
+  - https://expresstech.io/the-real-cost-of-self-hosting-n8n-in-2026/

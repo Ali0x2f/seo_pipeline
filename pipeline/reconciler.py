@@ -36,33 +36,21 @@ from pipeline.models import (
     SourceExtraction,
     WebVerdict,
 )
+from pipeline.prompts import resolve as resolve_prompt
 from pipeline.providers import BaseProvider, Usage
 from pipeline.schema import FieldSpec, SchemaSpec
 
-RECONCILE_CACHE_VERSION = 2
-WEB_CHECK_CACHE_VERSION = 1
+RECONCILE_CACHE_VERSION = 3
+WEB_CHECK_CACHE_VERSION = 2
 ProgressCb = Callable[[int, int, str], None] | None
 
-SYSTEM_PROMPT = (
-    "You consolidate research notes into a single authoritative dataset entry.\n"
-    "For each field you receive numbered claims taken from different source pages about "
-    "the same product.\n"
-    "Your job:\n"
-    "1. Merge claims that make the same point, keeping the clearest and most specific "
-    "wording. Never repeat the same point twice in different words.\n"
-    "2. Preserve every distinct substantive point. Do not drop information just to be "
-    "brief.\n"
-    "3. Prefer concrete detail (figures, tier names, limits) over vague phrasing.\n"
-    "4. If sources genuinely contradict each other on a fact, set conflict=true and "
-    "explain the disagreement in conflict_note, naming the differing values. Use the "
-    "best-supported value as the value. Differing levels of detail are NOT a conflict; "
-    "only incompatible facts are.\n"
-    "5. Introduce nothing that is not present in the claims. You have no other source.\n"
-    "6. NEVER use the product name as the value for a field. The product name is just "
-    "the subject — it is never a valid answer to a field's question. If no substantive "
-    "claims exist for a field, return an empty value.\n"
-    "7. Write in neutral, factual English with no marketing language."
-)
+
+def merge_system_prompt(spec: SchemaSpec, cfg: Config) -> str:
+    return resolve_prompt("merge", spec.scenario, cfg.merge_prompt_override)
+
+
+def web_system_prompt(spec: SchemaSpec, cfg: Config) -> str:
+    return resolve_prompt("web", spec.scenario, cfg.web_prompt_override)
 
 
 def _norm(s: str) -> str:
@@ -241,6 +229,8 @@ def _merge_prompt(
         ]
         if field.guidance.strip():
             lines.append(f"Guidance: {field.guidance.strip()}")
+        if field.anchors.strip():
+            lines.append(f"Must cover: {field.anchors.strip()}")
         lines.append("Claims from sources:")
         for i, (url, vals) in enumerate(claims, 1):
             lines.append(f"  [{i}] source: {url}")
@@ -264,6 +254,7 @@ def _llm_merge_batch(
     usage: Usage,
 ) -> dict[str, ReconciledField]:
     fields = [f for f, _ in batch]
+    system = merge_system_prompt(spec, cfg)
     payload_fingerprint = make_key(*[f"{f.key}:{c}" for f, c in batch])
     ck = make_key(
         "reconcile",
@@ -271,6 +262,7 @@ def _llm_merge_batch(
         provider.name,
         provider.model,
         cfg.temperature,
+        system,
         product,
         payload_fingerprint,
     )
@@ -279,7 +271,7 @@ def _llm_merge_batch(
     if data is None:
         try:
             resp = provider.complete_json(
-                SYSTEM_PROMPT,
+                system,
                 _merge_prompt(spec, product, batch),
                 _merge_schema(fields),
                 max_tokens=cfg.max_output_tokens,
@@ -355,29 +347,6 @@ def _llm_merge_batch(
 # ------------------------------------------------------------------ web arbitration
 
 
-WEB_SYSTEM_PROMPT = (
-    "You are a fact-checker settling disagreements between research sources.\n"
-    "You will be given a product, a field, and the conflicting values that different "
-    "pages claimed for it.\n"
-    "Search the web to establish which claim is correct today. Prefer the vendor's own "
-    "official pages (pricing, docs, changelog) over blogs, listicles and affiliate "
-    "reviews, which go stale and are often wrong.\n"
-    "Rules:\n"
-    "1. Base the verdict only on what you actually found while searching. Never fall "
-    "back on memory.\n"
-    "2. If the search confirms one of the claims, or gives a more accurate current "
-    "value, set resolved=true and give that value.\n"
-    "3. If sources genuinely still disagree, or you cannot find authoritative "
-    "confirmation, set resolved=false and leave the value empty. An honest "
-    "'unresolved' is far more useful than a confident guess.\n"
-    "4. A value that changed over time is not a contradiction to average out. Report "
-    "what is true now and say so in reasoning.\n"
-    "5. In reasoning, state in 1-3 sentences what you found and which source settled "
-    "it. Be specific about figures.\n"
-    "6. Write plain factual English. No marketing language."
-)
-
-
 def _web_check_schema(field: FieldSpec) -> dict:
     return {
         "type": "object",
@@ -417,6 +386,8 @@ def _web_check_prompt(
     ]
     if field.guidance.strip():
         lines.append(f"GUIDANCE: {field.guidance.strip()}")
+    if field.anchors.strip():
+        lines.append(f"MUST COVER: {field.anchors.strip()}")
     lines += [f"ANSWER SHAPE: {shape}", "", "CONFLICTING CLAIMS FROM SCRAPED SOURCES:"]
     for i, (url, vals) in enumerate(claims, 1):
         lines.append(f"  [{i}] {url}")
@@ -443,12 +414,14 @@ def _web_check_field(
     cache: DiskCache,
 ) -> WebVerdict:
     """Arbitrate one conflicting field. Never raises: failures become a noted verdict."""
+    system = web_system_prompt(spec, cfg)
     ck = make_key(
         "webcheck",
         WEB_CHECK_CACHE_VERSION,
         provider.name,
         provider.model,
         cfg.web_check_max_searches,
+        system,
         product,
         field.key,
         rf.value,
@@ -468,7 +441,7 @@ def _web_check_field(
 
     try:
         resp = provider.search_json(
-            WEB_SYSTEM_PROMPT,
+            system,
             _web_check_prompt(spec, product, field, rf, claims),
             _web_check_schema(field),
             max_tokens=cfg.max_output_tokens,

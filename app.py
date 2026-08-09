@@ -67,7 +67,19 @@ from config import RUNS_DIR, SCHEMA_DIR, Config
 from jobs import start_job
 from pipeline import cache as cache_mod
 from pipeline import exporter
-from pipeline.models import RunState
+from pipeline.brief import list_sheets, parse_brief_sheet
+from pipeline.models import InputRow, RunState
+from pipeline.prompts import (
+    SCENARIO_LABELS,
+    STAGES,
+    PromptSet,
+    default_prompts,
+    get_prompts,
+    is_customised,
+    reset_prompts,
+    save_prompts,
+)
+from pipeline.prompts import STAGE_LABELS as PROMPT_STAGE_LABELS
 from pipeline.providers import (
     PROVIDERS,
     SEARCH_PROVIDERS,
@@ -82,6 +94,7 @@ from pipeline.schema import (
     FieldSpec,
     FillFrom,
     ListOutput,
+    Scenario,
     SchemaSpec,
     list_schemas,
     load_schema_by_name,
@@ -123,6 +136,18 @@ def init_state() -> None:
         "loaded_run_msg": "",
         "active_run_id": "",
         "chromium_installed": _chromium_is_installed(),
+        "prompt_scenario": Scenario.GENERAL.value,
+        # Unsaved prompt edits, keyed "<scenario>:<stage>". Kept separate from the saved
+        # library so a prompt can be trialled on a run without being committed.
+        "prompt_drafts": {},
+        # Streamlit restores a text_area from its key and ignores `value`, so a reset
+        # cannot repopulate the box in place. Bumping this changes the key, which builds
+        # a genuinely new widget that does take the default.
+        "prompt_nonce": 0,
+        # Same problem, worse consequence: after loading or importing a schema the
+        # editor would keep showing the previous one's name, nodes and fields, and
+        # Apply would write those back over the new spec.
+        "spec_nonce": 0,
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
@@ -157,6 +182,15 @@ def build_cfg() -> Config:
     cfg.web_check_max_searches = ss.get(
         "web_check_max_searches", cfg.web_check_max_searches
     )
+
+    # The schema decides the scenario; unsaved Advanced-tab edits for that scenario ride
+    # along so a trial prompt is used without being saved to disk.
+    spec = ss.get("spec")
+    cfg.scenario = spec.scenario.value if spec else cfg.scenario
+    drafts = ss.get("prompt_drafts") or {}
+    cfg.extract_prompt_override = drafts.get(f"{cfg.scenario}:extract", "")
+    cfg.merge_prompt_override = drafts.get(f"{cfg.scenario}:merge", "")
+    cfg.web_prompt_override = drafts.get(f"{cfg.scenario}:web", "")
 
     # Credentials and endpoints are stored per provider, so switching provider cannot
     # leak the previous one's base URL or key into the new one.
@@ -404,6 +438,7 @@ def fields_to_df(spec: SchemaSpec) -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
+                "section": f.section,
                 "key": f.key,
                 "label": f.label,
                 "question": f.question,
@@ -411,6 +446,9 @@ def fields_to_df(spec: SchemaSpec) -> pd.DataFrame:
                 "nodes": f" {NODE_SEP} ".join(f.nodes),
                 "max_items": f.max_items,
                 "guidance": f.guidance,
+                "anchors": f.anchors,
+                "custom_input": f.custom_input,
+                "source_urls": "\n".join(f.source_urls),
                 "source": f.fill_from.value,
             }
             for f in spec.fields
@@ -439,11 +477,68 @@ def df_to_fields(df: pd.DataFrame) -> tuple[list[FieldSpec], list[str]]:
                     max_items=int(r.get("max_items") or 10),
                     guidance=str(r.get("guidance") or "").strip(),
                     fill_from=FillFrom(str(r.get("source") or "extract").strip()),
+                    section=str(r.get("section") or "").strip(),
+                    anchors=str(r.get("anchors") or "").strip(),
+                    custom_input=str(r.get("custom_input") or "").strip(),
+                    source_urls=[
+                        u.strip()
+                        for u in str(r.get("source_urls") or "").splitlines()
+                        if u.strip()
+                    ],
                 )
             )
         except Exception as e:
             errors.append(f"Row {i + 1} ({key}): {e}")
     return fields, errors
+
+
+def render_brief_import() -> None:
+    """Turn a 'data structure' workbook into a schema, one sheet at a time.
+
+    The workbook holds one sheet per scenario, and they need different prompts, so they
+    are imported as separate schemas rather than merged into one.
+    """
+    with st.expander("Import a brief workbook (.xlsx)"):
+        st.caption(
+            "Expects the client's data-structure columns: Article - H2, Article - H3, "
+            "Key, Prompt, Anchors, Source urls, Custom input. Each sheet becomes one "
+            "schema — the General sheet and the Tools sheet use different system "
+            "prompts, so import them separately."
+        )
+        up = st.file_uploader("Workbook", type=["xlsx", "xlsm"], key="brief_uploader")
+        if not up:
+            return
+
+        data = up.getvalue()
+        try:
+            sheets = list_sheets(data)
+        except Exception as e:
+            st.error(f"Could not read workbook: {e}")
+            return
+
+        c1, c2, c3 = st.columns([2, 1, 1])
+        sheet = c1.selectbox("Sheet", sheets, key="brief_sheet")
+        name = c2.text_input("Schema name", value="", key="brief_name")
+        entity = c3.text_input("Entity label", value="Product", key="brief_entity")
+
+        if st.button("Import sheet", type="primary", width=STRETCH, key="brief_import"):
+            try:
+                spec, warns = parse_brief_sheet(
+                    data, sheet, name.strip(), entity.strip() or "Product"
+                )
+            except Exception as e:
+                st.error(f"Import failed: {e}")
+                return
+            st.session_state.spec = spec
+            st.session_state.spec_source = spec.name
+            st.session_state.spec_nonce += 1
+            for w in warns:
+                st.warning(w)
+            st.success(
+                f"Imported {len(spec.fields)} field(s) from {sheet!r} as the "
+                f"{spec.scenario.value} scenario. Review below, then Save to disk."
+            )
+            st.rerun()
 
 
 def tab_schema() -> None:
@@ -472,33 +567,49 @@ def tab_schema() -> None:
         if st.button("Load", width=STRETCH, disabled=not names, key="schema_load"):
             st.session_state.spec = SchemaSpec.load(SCHEMA_DIR / f"{picked}.yaml")
             st.session_state.spec_source = picked
+            st.session_state.spec_nonce += 1
             st.success(f"Loaded {picked}")
             st.rerun()
+
+    render_brief_import()
 
     spec = current_spec()
     if spec is None:
         st.info("No schema available. Create one below.")
         return
 
-    a, b, c = st.columns(3)
-    a.text_input("Schema name", value=spec.name, key="spec_name")
+    # Widget keys carry a nonce that changes whenever the spec is replaced, so loading
+    # or importing a schema rebuilds these inputs instead of showing the previous one.
+    n = st.session_state.spec_nonce
+    a, b, c, d = st.columns(4)
+    a.text_input("Schema name", value=spec.name, key=f"spec_name_{n}")
     b.text_input(
         "Entity label",
         value=spec.entity_label,
-        key="spec_entity",
+        key=f"spec_entity_{n}",
         help="What one row represents. 'Product' here.",
     )
+    scenarios = [s.value for s in Scenario]
     c.selectbox(
+        "Scenario",
+        scenarios,
+        index=scenarios.index(spec.scenario.value),
+        key=f"spec_scenario_{n}",
+        format_func=lambda v: SCENARIO_LABELS[Scenario(v)],
+        help="Which family of system prompts a run on this schema uses. Edit the "
+        "prompts themselves in the Advanced tab.",
+    )
+    d.selectbox(
         "List rendering",
         [o.value for o in ListOutput],
         index=[o.value for o in ListOutput].index(spec.list_output.value),
-        key="spec_listout",
+        key=f"spec_listout_{n}",
         help="How list fields are written into a cell.",
     )
     st.text_area(
         "Nodes (one per line)",
         value="\n".join(spec.nodes),
-        key="spec_nodes",
+        key=f"spec_nodes_{n}",
         height=90,
         help="The Node values your input sheet uses, exactly as spelled there. One per "
         "line, because node names often contain commas.",
@@ -509,8 +620,14 @@ def tab_schema() -> None:
         fields_to_df(spec),
         num_rows="dynamic",
         width=STRETCH,
-        key="field_editor",
+        key=f"field_editor_{n}",
         column_config={
+            "section": st.column_config.TextColumn(
+                "section (H2)",
+                help="The article heading this field sits under. Presentational only — "
+                "routing still happens through nodes.",
+                width="small",
+            ),
             "key": st.column_config.TextColumn(
                 "key",
                 help="snake_case identifier. Changing it invalidates cached "
@@ -518,7 +635,7 @@ def tab_schema() -> None:
                 width="small",
             ),
             "label": st.column_config.TextColumn(
-                "label", help="Exact spreadsheet header."
+                "label (H3)", help="Exact spreadsheet header."
             ),
             "question": st.column_config.TextColumn(
                 "question",
@@ -538,6 +655,24 @@ def tab_schema() -> None:
                 "max", min_value=1, max_value=50, width="small"
             ),
             "guidance": st.column_config.TextColumn("guidance", width="large"),
+            "anchors": st.column_config.TextColumn(
+                "anchors",
+                width="large",
+                help="Angles the brief insists on covering. Sent to the model as "
+                "'Must cover'.",
+            ),
+            "custom_input": st.column_config.TextColumn(
+                "custom input",
+                width="large",
+                help="Evidence you supplied by hand (a forum reply, a note from a "
+                "call). Treated as quotable evidence alongside the page text.",
+            ),
+            "source_urls": st.column_config.TextColumn(
+                "source urls",
+                width="large",
+                help="URLs the brief nominated for this field, one per line. Use "
+                "'Seed input from schema' in the Input tab to turn them into rows.",
+            ),
             "source": st.column_config.SelectboxColumn(
                 "source",
                 options=[f.value for f in FillFrom],
@@ -557,15 +692,18 @@ def tab_schema() -> None:
         else:
             try:
                 new_spec = SchemaSpec(
-                    name=st.session_state.spec_name.strip() or spec.name,
-                    entity_label=st.session_state.spec_entity.strip() or "Product",
+                    name=st.session_state[f"spec_name_{n}"].strip() or spec.name,
+                    entity_label=(
+                        st.session_state[f"spec_entity_{n}"].strip() or "Product"
+                    ),
                     description=spec.description,
+                    scenario=Scenario(st.session_state[f"spec_scenario_{n}"]),
                     nodes=[
-                        n.strip()
-                        for n in st.session_state.spec_nodes.splitlines()
-                        if n.strip()
+                        line.strip()
+                        for line in st.session_state[f"spec_nodes_{n}"].splitlines()
+                        if line.strip()
                     ],
-                    list_output=ListOutput(st.session_state.spec_listout),
+                    list_output=ListOutput(st.session_state[f"spec_listout_{n}"]),
                     fields=fields,
                 )
                 st.session_state.spec = new_spec
@@ -618,6 +756,7 @@ def tab_schema() -> None:
             if st.button("Apply YAML", width=STRETCH, key="schema_apply_yaml"):
                 try:
                     st.session_state.spec = SchemaSpec.from_yaml_text(text)
+                    st.session_state.spec_nonce += 1
                     st.success("Applied.")
                     st.rerun()
                 except Exception as e:
@@ -655,6 +794,25 @@ def tab_input() -> None:
         key="input_default_product",
         help="Used for rows with no Product column. Required if your sheet lacks one.",
     )
+
+    # The brief workbook already nominates URLs per field, so a run can start straight
+    # from the schema without the user rebuilding that list by hand.
+    seeded = spec.seed_rows(default_product.strip()) if spec else []
+    if seeded:
+        if st.button(
+            f"Seed input from schema ({len(seeded)} URL(s))",
+            disabled=not default_product.strip(),
+            key="input_seed",
+            help="Uses the 'source urls' recorded on each schema field.",
+        ):
+            st.session_state.rows = [
+                InputRow(product=p, node=n, url=u) for p, n, u in seeded
+            ]
+            st.session_state.input_warnings = []
+            st.session_state.preflight = None
+            st.rerun()
+        if not default_product.strip():
+            st.caption("Enter a product name above to seed from the schema.")
 
     data = None
     filename = ""
@@ -1601,6 +1759,134 @@ def _parse_restore(blob: bytes) -> list[RunState]:
     return [RunState.model_validate(item) for item in items]
 
 
+# --------------------------------------------------------------------- advanced tab
+
+
+def tab_advanced() -> None:
+    st.subheader("Advanced")
+    st.caption(
+        "The system prompts sent to the model at every LLM stage. They are split by "
+        "scenario because an alternatives article is written in two registers: the "
+        "sections about the subject product, and the per-tool sections comparing it "
+        "against alternatives."
+    )
+
+    ss = st.session_state
+    spec = current_spec()
+
+    # Open on whatever the loaded schema actually uses; showing the other scenario's
+    # prompts first is a reliable way to edit the wrong ones.
+    if spec and ss.get("_prompt_spec_nonce") != ss.spec_nonce:
+        ss._prompt_spec_nonce = ss.spec_nonce
+        ss.prompt_scenario = spec.scenario.value
+
+    scenarios = [s.value for s in Scenario]
+    picked = st.radio(
+        "Scenario",
+        scenarios,
+        horizontal=True,
+        key="prompt_scenario",
+        format_func=lambda v: SCENARIO_LABELS[Scenario(v)],
+    )
+
+    if spec:
+        if spec.scenario.value == picked:
+            st.success(
+                f"Schema **{spec.name}** uses this scenario, so these prompts apply to "
+                "the next run.",
+                icon="✅",
+            )
+        else:
+            st.info(
+                f"Schema **{spec.name}** is set to **{spec.scenario.value}**, so edits "
+                "here are saved but will not affect the next run. Change the scenario "
+                "in the Schema tab to use them.",
+                icon="ℹ️",
+            )
+
+    if picked == Scenario.TOOLS.value:
+        st.caption(
+            "The tools prompts are stricter about two things: never attributing a "
+            "competitor's traits to the subject (most sources are 'A vs B' posts), and "
+            "never converting, rounding or averaging a price."
+        )
+    else:
+        st.caption(
+            "The general prompts cover the article's subject product — company history, "
+            "what the platform is, who uses it, and where it falls short."
+        )
+
+    saved = get_prompts(picked)
+    defaults = default_prompts(picked)
+    drafts: dict = ss.prompt_drafts
+
+    edited: dict[str, str] = {}
+    for stage in STAGES:
+        draft_key = f"{picked}:{stage}"
+        current = drafts.get(draft_key) or getattr(saved, stage)
+        with st.expander(
+            PROMPT_STAGE_LABELS[stage],
+            expanded=(stage == "extract"),
+        ):
+            marks = []
+            if is_customised(picked, stage):
+                marks.append("saved override")
+            if drafts.get(draft_key):
+                marks.append("unsaved edit")
+            if marks:
+                st.caption(" · ".join(marks))
+
+            text = st.text_area(
+                "System prompt",
+                value=current,
+                height=320,
+                key=f"prompt_text_{picked}_{stage}_{ss.prompt_nonce}",
+                label_visibility="collapsed",
+            )
+            edited[stage] = text
+
+            if text.strip() != getattr(defaults, stage).strip():
+                with st.popover("Show built-in default"):
+                    st.code(getattr(defaults, stage), language="text")
+
+    c1, c2, c3 = st.columns(3)
+    if c1.button("Save prompts", type="primary", width=STRETCH, key="prompts_save"):
+        save_prompts(picked, PromptSet(**edited))
+        # Saved text is no longer a draft, or the two would fight over precedence.
+        for stage in STAGES:
+            drafts.pop(f"{picked}:{stage}", None)
+        ss.prompt_nonce += 1
+        st.success("Saved. New runs will use these prompts.")
+        st.rerun()
+
+    if c2.button(
+        "Use without saving",
+        width=STRETCH,
+        key="prompts_try",
+        help="Applies the text above to runs in this session only.",
+    ):
+        for stage in STAGES:
+            if edited[stage].strip() == getattr(saved, stage).strip():
+                drafts.pop(f"{picked}:{stage}", None)
+            else:
+                drafts[f"{picked}:{stage}"] = edited[stage].strip()
+        st.success("Applied to this session.")
+        st.rerun()
+
+    if c3.button("Reset to defaults", width=STRETCH, key="prompts_reset"):
+        reset_prompts(picked)
+        for stage in STAGES:
+            drafts.pop(f"{picked}:{stage}", None)
+        ss.prompt_nonce += 1
+        st.success("Restored the built-in prompts.")
+        st.rerun()
+
+    st.caption(
+        "Prompts are part of every cache key, so an edited prompt correctly misses the "
+        "cache and re-runs. Unchanged fields still cost nothing."
+    )
+
+
 # ------------------------------------------------------------------------- help tab
 
 
@@ -1651,7 +1937,41 @@ def tab_help() -> None:
         | **Review** | Inspect conflicts, trace provenance, check coverage. |
         | **Export** | Download the workbook. |
         | **Saved runs** | Reopen past runs — every stage is persisted to disk. |
+        | **Advanced** | Edit the system prompts sent at every LLM stage, per scenario. |
         | **Storage** | Choose where runs are saved (JSON files and/or a database), migrate, back up, and restore. |
+
+        ### Scenarios and prompts (Advanced tab)
+
+        An alternatives article is written in two registers, so the prompts come in two
+        sets and a schema declares which one it uses.
+
+        - **General** — the sections about the article's *subject* product: company
+          history, what the platform is, who uses it, where it falls short.
+        - **Tools** — the per-alternative sections (strengths, limitations, pricing).
+          These prompts are stricter about two things: never attributing a competitor's
+          traits to the subject (most sources are "A vs B" posts), and never converting,
+          rounding or averaging a price.
+
+        Each scenario has a prompt for all three LLM stages — extraction, merge, and web
+        check.  **Save prompts** writes them to `prompts.json`; **Use without saving**
+        applies them to this session only, which is the cheap way to trial a change.
+        Prompts are part of every cache key, so an edit correctly misses the cache.
+
+        ### Importing a brief workbook
+
+        The Schema tab reads the client's data-structure spreadsheet directly (columns
+        *Article - H2*, *Article - H3*, *Key*, *Prompt*, *Anchors*, *Source urls*,
+        *Custom input*).  Each sheet becomes one schema, and the scenario is taken from
+        the sheet name, so import the General and Tools sheets separately.
+
+        - **H2/H3 are merged cells**, so blanks inherit from the row above.  H3 becomes
+          the column label *and* the node that routes URLs to it.
+        - **Anchors** are angles the brief insists on covering; they reach the model as
+          "Must cover".
+        - **Custom input** is evidence you supplied by hand.  It is quotable evidence
+          alongside the page text, so a claim citing it still passes the quote check.
+        - **Source urls** are kept on the field, and *Seed input from schema* in the
+          Input tab turns them into rows so a run can start without building the sheet.
 
         ### Storage
 
@@ -1741,8 +2061,18 @@ def main() -> None:
         "traceable to the page it came from.  Built by Ali."
     )
 
-    t1, t2, t3, t4, t5, t6, t7, t8 = st.tabs(
-        ["Schema", "Input", "Run", "Review", "Export", "Saved runs", "Storage", "Help"]
+    t1, t2, t3, t4, t5, t6, t7, t8, t9 = st.tabs(
+        [
+            "Schema",
+            "Input",
+            "Run",
+            "Review",
+            "Export",
+            "Saved runs",
+            "Advanced",
+            "Storage",
+            "Help",
+        ]
     )
     with t1:
         tab_schema()
@@ -1757,8 +2087,10 @@ def main() -> None:
     with t6:
         tab_runs()
     with t7:
-        tab_storage()
+        tab_advanced()
     with t8:
+        tab_storage()
+    with t9:
         tab_help()
 
 

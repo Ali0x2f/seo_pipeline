@@ -22,25 +22,17 @@ from typing import Callable
 from config import Config
 from pipeline.cache import DiskCache, make_key
 from pipeline.models import FieldClaim, ScrapedPage, SourceExtraction
+from pipeline.prompts import resolve as resolve_prompt
 from pipeline.providers import BaseProvider, LLMError, Usage
 from pipeline.schema import FieldSpec, SchemaSpec
 
-EXTRACT_CACHE_VERSION = 3
+EXTRACT_CACHE_VERSION = 4
 
 ProgressCb = Callable[[int, int, str], None] | None
 
-SYSTEM_PROMPT = (
-    "You are a meticulous research analyst building a factual comparison dataset.\n"
-    "Rules you must never break:\n"
-    "1. Use ONLY the supplied page text. Never use prior knowledge about the product.\n"
-    "2. If the page does not address a field, set found=false, leave the value empty, "
-    "and move on. An honest gap is far more useful than a guess.\n"
-    "3. Every field you mark found=true must include a short verbatim quote copied "
-    "character-for-character from the page text as support.\n"
-    "4. Report what the page claims, not whether you agree. Do not soften criticism and "
-    "do not repeat marketing slogans as if they were facts.\n"
-    "5. Prefer specific, checkable detail (numbers, tier names, limits) over generalities."
-)
+
+def system_prompt(spec: SchemaSpec, cfg: Config) -> str:
+    return resolve_prompt("extract", spec.scenario, cfg.extract_prompt_override)
 
 
 def _norm_for_match(s: str) -> str:
@@ -106,7 +98,21 @@ def build_user_prompt(
             "short_text": "one short phrase",
             "prose": "2-4 sentences",
         }[f.shape.value]
-        lines.append(f"- {f.key} ({f.label}) [{shape}]: {f.prompt_line()}")
+        section = f"{f.section} > " if f.section.strip() else ""
+        lines.append(f"- {f.key} ({section}{f.label}) [{shape}]: {f.prompt_line()}")
+
+    # Analyst-supplied evidence is quoted material the brief attached to a field. It is
+    # evidence like any page text, so a claim may cite it -- but it is not the page, so
+    # it is fenced separately and the quote check knows about it.
+    extras = [(f, f.custom_input.strip()) for f in fields if f.custom_input.strip()]
+    if extras:
+        lines += ["", "ANALYST-SUPPLIED EVIDENCE (counts as permitted evidence):"]
+        for f, text in extras:
+            lines += [
+                f"-------- BEGIN {f.key} NOTES --------",
+                text,
+                f"-------- END {f.key} NOTES --------",
+            ]
 
     src = f"{page.title} <{page.url}>" if page.title else page.url
     lines += [
@@ -150,7 +156,10 @@ def parse_extraction(
     data: dict, fields: list[FieldSpec], page_text: str
 ) -> dict[str, FieldClaim]:
     payload = (data or {}).get("fields") or {}
-    haystack = _norm_for_match(page_text)
+    # Analyst notes were shown to the model as evidence, so a quote drawn from them is
+    # genuine support and must not be flagged as invented.
+    notes = " ".join(f.custom_input for f in fields if f.custom_input.strip())
+    haystack = _norm_for_match(f"{page_text}\n{notes}" if notes else page_text)
     claims: dict[str, FieldClaim] = {}
 
     for f in fields:
@@ -198,13 +207,17 @@ def extract_page(
         base.error = f"Node {page.node!r} feeds no fields in this schema"
         return base
 
-    fingerprint = make_key(*[f"{f.key}|{f.shape}|{f.prompt_line()}" for f in fields])
+    system = system_prompt(spec, cfg)
+    fingerprint = make_key(
+        *[f"{f.key}|{f.shape}|{f.prompt_line()}|{f.custom_input}" for f in fields]
+    )
     ck = make_key(
         "extract",
         EXTRACT_CACHE_VERSION,
         provider.name,
         provider.model,
         cfg.temperature,
+        system,
         page.product,
         page.url,
         fingerprint,
@@ -220,7 +233,7 @@ def extract_page(
     user = build_user_prompt(spec, fields, page, page.product)
     try:
         resp = provider.complete_json(
-            SYSTEM_PROMPT,
+            system,
             user,
             schema,
             max_tokens=cfg.max_output_tokens,
