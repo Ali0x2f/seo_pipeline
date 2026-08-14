@@ -1212,7 +1212,7 @@ def tab_run() -> None:
         if state.warnings:
             with st.expander(f"{len(state.warnings)} warning(s)"):
                 for w in state.warnings:
-                    st.write(f"- {w}")
+                    st.error(w) if "failed" in w else st.warning(w)
 
     if st.button("Reset run state", key="run_reset"):
         st.session_state.job = None
@@ -1692,7 +1692,7 @@ def tab_runs() -> None:
             "tab to continue from where it left off."
         )
     if row["warnings"]:
-        st.caption(
+        st.warning(
             f"{row['warnings']} warning(s) recorded — "
             f"{row['pages_failed']} page(s) failed to fetch. Details after loading."
         )
@@ -1821,7 +1821,7 @@ def tab_storage() -> None:
                     f"failed {report['failed']}."
                 )
                 for err in errors + report["errors"]:
-                    st.caption(f"⚠️ {err}")
+                    st.warning(err)
                 st.cache_data.clear()
 
     if m2.button("Export database → JSON files", width=STRETCH, key="db_export_files"):
