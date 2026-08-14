@@ -2098,7 +2098,9 @@ def tab_help() -> None:
 
         **1. Scrape** — Fetch every URL.  A fast static HTTP check runs first; most
         pages (docs, blog posts) skip the heavy Chromium browser.  Only JS-rendered
-        pages (pricing tables, SPAs) launch headless Chrome.  Evidence you pasted as
+        pages (pricing tables, SPAs) launch headless Chrome.  A page that comes back
+        blocked (Cloudflare, DataDome) or that fails outright is retried through the
+        **ScrapeOps** proxy, if a key is set — see below.  Evidence you pasted as
         *custom input* is already text, so it skips this stage entirely.
 
         **2. Extract** — Each source goes to the LLM with a prompt listing only the
@@ -2218,7 +2220,37 @@ def tab_help() -> None:
           own API key, endpoint, and model, so switching is safe.
         - **Resolve conflicts with web search** — Fact-check disagreements against live
           web pages.  See below.
+        - **Proxy fallback (ScrapeOps)** — Paste a key to fetch pages our own scraper
+          gets blocked on.  See below.
         - **Parameters** — Temperature, token budget, concurrency, cache toggle.
+
+        ### Blocked pages (ScrapeOps)
+
+        Review sites and forums increasingly serve a captcha instead of content, and no
+        amount of local browser tuning gets past Cloudflare or DataDome from a datacenter
+        IP.  Paste a [ScrapeOps](https://scrapeops.io) key into **Sidebar → Proxy
+        fallback**, the same way you'd paste an LLM key, and blocked pages are retried
+        through rotating residential IPs instead of simply failing.
+
+        - **Fallback, not the default route.**  Every proxied request costs credits, so
+          it only fires when the local fetch fails outright or comes back holding an
+          anti-bot interstitial ("Checking your browser…", a captcha page, etc.).
+        - **Escalates only as far as needed.**  A refused request retries first on
+          residential IPs, then through the anti-bot bypass engine — each step costs
+          more, so each only runs after the cheaper one has failed. Toggle this off in
+          the expander to cap spend at the first attempt.
+        - **Reddit always goes straight to it.**  Reddit rejects every datacenter IP, so
+          a local attempt is pure wasted latency.  It's also fetched through Reddit's own
+          JSON API rather than the rendered page, which returns the post body and the
+          full nested comment tree as structured data — cheaper and far more complete
+          than scraping the infinite-scroll feed.
+        - **Render JavaScript** toggle and **Render wait** control whether/how long
+          ScrapeOps' own browser waits for JS-built content, same idea as the local
+          Chromium settle delay.
+        - **Method column** in Review and the exported workbook shows which path a page
+          took: `crawl4ai`, `httpx-trafilatura`, `scrapeops`, or `scrapeops-reddit`.
+        - **Test ScrapeOps** in the sidebar fetches one known page through the proxy, so
+          a bad key or an exhausted plan surfaces before a real run.
 
         ### Web conflict resolution
 
@@ -2265,6 +2297,8 @@ def tab_help() -> None:
         - **Static fallback is automatic.**  Even if Chromium isn't installed, most
           pages still work via plain HTTP extraction — only JS-heavy pricing tables
           need the browser.
+        - **Set a ScrapeOps key for review sites and Reddit.**  G2, Capterra and similar
+          sites block direct scraping outright; without a key those pages just fail.
         - **Back up before you clear runs.**  Use the Storage tab to download the
           SQLite file or a JSON dump — deleting a run is permanent.
         """)
