@@ -44,7 +44,8 @@ class ScrapedPage(BaseModel):
     title: str = ""
     text: str = ""
     char_count: int = 0
-    fetch_method: str = ""  # crawl4ai | httpx-trafilatura | cache | custom-input
+    # crawl4ai | httpx-trafilatura | scrapeops | scrapeops-reddit | cache | custom-input
+    fetch_method: str = ""
     truncated: bool = False
     error: str | None = None
     fetched_at: str = Field(default_factory=_now)

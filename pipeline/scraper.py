@@ -7,7 +7,10 @@ Strategy:
   2. Only launch headless Chromium for URLs where static extraction returned
      less than the configured character budget.  This is the minority (JS-only
      pricing pages, SPAs, etc.).
-  3. Per-domain serialisation uses a lock but the politeness delay fires
+  3. Anything that still fails, or comes back holding an anti-bot interstitial, is
+     replayed through the ScrapeOps residential proxy. Sites known to block every
+     direct request (Reddit) skip straight to it.
+  4. Per-domain serialisation uses a lock but the politeness delay fires
      *after* releasing it, so other domains are never blocked.
 
 Notes:
@@ -27,6 +30,7 @@ from typing import Callable, Iterable
 from urllib.parse import urlparse, urlunparse
 
 from config import Config
+from pipeline import scrapeops
 from pipeline.cache import DiskCache, make_key
 from pipeline.models import (
     CUSTOM_INPUT_METHOD,
@@ -35,7 +39,7 @@ from pipeline.models import (
     ScrapedPage,
 )
 
-SCRAPE_CACHE_VERSION = 4
+SCRAPE_CACHE_VERSION = 5
 PER_DOMAIN_DELAY_S = 1.0
 STATIC_CONCURRENCY_MULTIPLIER = 3  # static reqs are cheap — run more in parallel
 
@@ -197,10 +201,13 @@ async def _scrape_batch(
 ) -> dict[str, dict]:
     """Fetch every distinct URL once.  Returns url -> payload dict.
 
-    Two-phase approach:
+    Phases:
+      0. Proxy-first — URLs on always-blocked hosts go straight to ScrapeOps, in
+         parallel with everything below.
       1. Static pre-check — run at high concurrency for ALL pending URLs.
          URLs that return >= max_scrape_chars of usable text skip the browser.
       2. Browser phase — only the remaining JS-heavy URLs go through Chromium.
+      3. Proxy fallback — browser failures and anti-bot pages are retried via ScrapeOps.
     """
     from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
     from crawl4ai.content_filter_strategy import PruningContentFilter
@@ -227,6 +234,74 @@ async def _scrape_batch(
     if not pending:
         return out
 
+    lock = asyncio.Lock()
+
+    async def _record(url: str, payload: dict, note: str) -> None:
+        nonlocal done
+        if payload.get("success"):
+            cache.set(
+                make_key("scrape", SCRAPE_CACHE_VERSION, url, cfg.max_scrape_chars),
+                payload,
+            )
+        async with lock:
+            out[url] = payload
+            done += 1
+            if progress:
+                progress(done, total, note)
+
+    async def _via_proxy(url: str, payload: dict) -> dict:
+        """Replay a failed or challenged fetch through ScrapeOps, keeping whatever we
+        already have if the proxy does no better."""
+        try:
+            title, text, method = await scrapeops.fetch(url, cfg)
+        except Exception as e:
+            prior = payload.get("error")
+            note = f"scrapeops: {e}"
+            payload["error"] = f"{prior} | {note}" if prior else note
+            return payload
+        if len(text) <= len(payload.get("text") or ""):
+            return payload
+        return {
+            "url": url,
+            "success": bool(text),
+            "title": title or payload.get("title") or "",
+            "text": text,
+            "fetch_method": method,
+            "error": None if text else payload.get("error"),
+        }
+
+    # ── phase 0: sites that always block us go straight to the proxy ──
+    proxy_first: list[str] = []
+    if scrapeops.available(cfg):
+        proxy_first = [u for u in pending if scrapeops.needs_proxy_first(u)]
+        pending = [u for u in pending if u not in set(proxy_first)]
+
+    async def _proxy_first_one(url: str) -> None:
+        payload = await _via_proxy(
+            url,
+            {
+                "url": url,
+                "success": False,
+                "title": "",
+                "text": "",
+                "fetch_method": "",
+                "error": None,
+            },
+        )
+        mark = "✓" if payload["success"] else "✗"
+        await _record(url, payload, f"scrapeops {mark} {url}")
+
+    proxy_first_task = (
+        asyncio.gather(*(_proxy_first_one(u) for u in proxy_first))
+        if proxy_first
+        else None
+    )
+
+    if not pending:
+        if proxy_first_task:
+            await proxy_first_task
+        return out
+
     # ── phase 1: static pre-check (cheap, high concurrency) ────────
     # Many pages (docs, blog posts, product pages) serve their content
     # server-side.  We can grab it with a plain HTTP call and skip the
@@ -238,7 +313,6 @@ async def _scrape_batch(
     static_sem = asyncio.Semaphore(
         max(1, cfg.scrape_concurrency * STATIC_CONCURRENCY_MULTIPLIER)
     )
-    lock = asyncio.Lock()
 
     # Pre-configure the browser so we can launch it concurrently.
     browser_cfg = BrowserConfig(
@@ -274,16 +348,7 @@ async def _scrape_batch(
 
         # If static gave us enough content, accept it and skip the browser.
         if payload["success"] and len(payload["text"]) >= cfg.max_scrape_chars:
-            cache.set(
-                make_key("scrape", SCRAPE_CACHE_VERSION, url, cfg.max_scrape_chars),
-                payload,
-            )
-            async with lock:
-                out[url] = payload
-                nonlocal done
-                done += 1
-                if progress:
-                    progress(done, total, f"static ✓ {url}")
+            await _record(url, payload, f"static ✓ {url}")
             return payload
         return None
 
@@ -304,6 +369,8 @@ async def _scrape_batch(
         # Browser was warming up but nobody needs it — shut it down.
         crawler = await browser_task
         await crawler.__aexit__(None, None, None)
+        if proxy_first_task:
+            await proxy_first_task
         return out
 
     if progress:
@@ -335,7 +402,6 @@ async def _scrape_batch(
     try:
 
         async def _browser_one(url: str) -> None:
-            nonlocal done
             payload: dict = {
                 "url": url,
                 "success": False,
@@ -381,22 +447,21 @@ async def _scrape_batch(
                 if payload["success"]:
                     payload["error"] = None
 
-            if payload["success"]:
-                cache.set(
-                    make_key("scrape", SCRAPE_CACHE_VERSION, url, cfg.max_scrape_chars),
-                    payload,
-                )
+            # Last resort: a hard failure, or a page that only served us an anti-bot
+            # interstitial, is worth the paid retry through a residential proxy.
+            if scrapeops.available(cfg) and (
+                not payload["success"] or scrapeops.looks_blocked(payload["text"], cfg)
+            ):
+                payload = await _via_proxy(url, payload)
 
-            async with lock:
-                out[url] = payload
-                done += 1
-                if progress:
-                    progress(done, total, url)
+            await _record(url, payload, url)
 
         await asyncio.gather(*(_browser_one(u) for u in browser_pending))
 
     finally:
         await crawler.__aexit__(None, None, None)
+        if proxy_first_task:
+            await proxy_first_task
 
     return out
 

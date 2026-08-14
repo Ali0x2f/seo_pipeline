@@ -79,6 +79,30 @@ class Config:
         "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
     )
 
+    # --- ScrapeOps proxy fallback ---
+    # Used only after our own fetchers fail or get challenged, plus up front for sites
+    # that reject datacenter IPs outright (Reddit). Billed per request, so it stays off
+    # the happy path.
+    scrapeops_api_key: str = os.getenv("SCRAPEOPS_API_KEY", "")
+    scrapeops_enabled: bool = os.getenv("SCRAPEOPS_ENABLED", "1") not in (
+        "0",
+        "false",
+        "False",
+    )
+    scrapeops_render_js: bool = os.getenv("SCRAPEOPS_RENDER_JS", "1") not in (
+        "0",
+        "false",
+        "False",
+    )
+    scrapeops_country: str = os.getenv("SCRAPEOPS_COUNTRY", "us")
+    scrapeops_wait_ms: int = _env_int("SCRAPEOPS_WAIT_MS", 3000)
+    # Allows escalating to residential IPs and then the anti-bot bypass engine when the
+    # standard pool is refused. Each step costs more credits, so each is only paid for
+    # after the cheaper one has failed.
+    scrapeops_residential_retry: bool = os.getenv(
+        "SCRAPEOPS_RESIDENTIAL_RETRY", "1"
+    ) not in ("0", "false", "False")
+
     # --- Behaviour ---
     use_cache: bool = os.getenv("USE_CACHE", "1") not in ("0", "false", "False")
     reconcile_batch_size: int = _env_int("RECONCILE_BATCH_SIZE", 6)

@@ -183,6 +183,19 @@ def build_cfg() -> Config:
         "web_check_max_searches", cfg.web_check_max_searches
     )
 
+    # Same sticky-slot trick as the LLM key: a pasted value must survive reruns where
+    # the widget was not rendered.
+    cfg.scrapeops_api_key = (
+        ss.get("_saved_scrapeops_api_key", "") or cfg.scrapeops_api_key
+    )
+    cfg.scrapeops_enabled = ss.get("scrapeops_enabled", cfg.scrapeops_enabled)
+    cfg.scrapeops_render_js = ss.get("scrapeops_render_js", cfg.scrapeops_render_js)
+    cfg.scrapeops_country = ss.get("scrapeops_country", cfg.scrapeops_country)
+    cfg.scrapeops_wait_ms = int(ss.get("scrapeops_wait_s", 3.0) * 1000)
+    cfg.scrapeops_residential_retry = ss.get(
+        "scrapeops_residential_retry", cfg.scrapeops_residential_retry
+    )
+
     # The schema decides the scenario; unsaved Advanced-tab edits for that scenario ride
     # along so a trial prompt is used without being saved to disk.
     spec = ss.get("spec")
@@ -212,6 +225,17 @@ def build_cfg() -> Config:
 
 def make_provider(cfg: Config):
     return build_provider(cfg.provider, cfg.key_for(), cfg.base_url_for(), cfg.model)
+
+
+def _test_scrapeops(cfg: Config) -> str:
+    """Fetch one page through the proxy so a bad key or plan surfaces before a run."""
+    from pipeline import scrapeops
+    from pipeline.scraper import run_async
+
+    if not cfg.scrapeops_api_key:
+        raise ValueError("No ScrapeOps API key set")
+    title, text, method = run_async(scrapeops.fetch("https://example.com", cfg))
+    return f"{method} OK — {len(text)} chars{f' · {title}' if title else ''}"
 
 
 # -------------------------------------------------------------------------- sidebar
@@ -404,6 +428,71 @@ def render_sidebar() -> None:
                 help="Extra wait after load. Client-rendered pricing tables "
                 "need this.",
             )
+
+        with st.expander("Proxy fallback (ScrapeOps)"):
+            st.caption(
+                "Retries pages that get blocked — anti-bot walls, 403s, empty "
+                "results — through rotating residential IPs. Only runs after a "
+                "local fetch fails, so it costs credits only on the pages that "
+                "need it. Reddit always goes through it (via the JSON API, which "
+                "returns the post plus the comment tree)."
+            )
+            st.toggle("Enable ScrapeOps fallback", value=True, key="scrapeops_enabled")
+            if ss.get("scrapeops_enabled"):
+                st.text_input(
+                    "ScrapeOps API key",
+                    value=ss.get("_saved_scrapeops_api_key", ""),
+                    key="scrapeops_api_key",
+                    type="password",
+                    placeholder="set in .env, or paste here",
+                )
+                if ss.get("scrapeops_api_key"):
+                    ss["_saved_scrapeops_api_key"] = ss["scrapeops_api_key"]
+                if default_cfg.scrapeops_api_key and not ss.get(
+                    "_saved_scrapeops_api_key"
+                ):
+                    st.caption("Using key from .env")
+                elif not ss.get("_saved_scrapeops_api_key"):
+                    st.caption("No key set — blocked pages will simply fail.")
+
+                st.toggle(
+                    "Render JavaScript",
+                    value=True,
+                    key="scrapeops_render_js",
+                    help="Runs the page in a real browser on their side. Needed for "
+                    "JS-built content, but costs more credits per request.",
+                )
+                st.text_input(
+                    "Proxy country",
+                    value="us",
+                    key="scrapeops_country",
+                    help="Two-letter code for the exit IP. Blank lets ScrapeOps choose.",
+                )
+                st.slider(
+                    "Render wait (s)",
+                    0.0,
+                    10.0,
+                    3.0,
+                    0.5,
+                    key="scrapeops_wait_s",
+                    help="Extra settle time after load when rendering JS.",
+                )
+                st.toggle(
+                    "Escalate on refusal",
+                    value=True,
+                    key="scrapeops_residential_retry",
+                    help="If the standard proxy pool is refused, retry from a real "
+                    "consumer IP, then through the anti-bot bypass engine. Needed for "
+                    "DataDome sites like G2 and Capterra. Each step costs more credits, "
+                    "so it only fires after the cheaper one has failed.",
+                )
+                if st.button("Test ScrapeOps", width=STRETCH, key="sb_test_scrapeops"):
+                    try:
+                        with st.spinner("Fetching a test page through the proxy…"):
+                            msg = _test_scrapeops(build_cfg())
+                        st.success(msg)
+                    except Exception as e:
+                        st.error(f"{type(e).__name__}: {e}")
 
         with st.expander("Cache"):
             st.checkbox(

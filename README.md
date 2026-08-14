@@ -6,7 +6,7 @@ product — with every claim traceable back to the page it came from.
 ```mermaid
 flowchart LR
     A["📄 <b>Brief</b><br/>xlsx → schema (keys + source URLs)"] --> B["🔍 <b>Preflight</b><br/>estimate cost & coverage"]
-    B --> C["🌐 <b>Scrape</b><br/>static pre-check → Chromium if needed"]
+    B --> C["🌐 <b>Scrape</b><br/>static pre-check → Chromium → proxy if blocked"]
     C --> D["🤖 <b>Extract</b><br/>LLM finds claims + verbatim quotes"]
     D --> E["🔗 <b>Reconcile</b><br/>merge claims, flag conflicts"]
     E --> F["👁️ <b>Review</b><br/>trace provenance, inspect gaps"]
@@ -296,6 +296,7 @@ pipeline/
   prompts.py            master system prompts, per scenario, with saved overrides
   models.py             pydantic domain models
   scraper.py            crawl4ai + static pre-check, concurrent
+  scrapeops.py          proxy fallback for blocked pages; Reddit via its JSON API
   providers.py          OpenAI / Anthropic / DeepSeek / Ollama
   extractor.py          per-source claim extraction with quote verification
   reconciler.py         cross-source merge, conflict detection, web arbitration
@@ -319,11 +320,36 @@ packages.txt            Chromium system deps for Streamlit Cloud
   applies aggressively.
 - Scraping is polite (one request at a time per domain, 1s delay outside the domain lock)
   but does not consult `robots.txt`. Check that the sites you target permit this.
+- Sites behind Cloudflare or DataDome (G2, Capterra, Reddit) will refuse a direct fetch.
+  Set a **ScrapeOps** key in the sidebar or `.env` to route those through a residential
+  proxy — see below.
 - Page content genuinely varies between fetches on some sites (A/B tests, geo pricing). The
   cache makes a given run reproducible; clearing it may change results.
 - On Streamlit Cloud the Chromium browser is not pre-installed — click the **Install
   Chromium** button in the sidebar when first deploying.  The install persists across
   reruns but may need repeating after an idle shutdown.
+
+## Blocked pages (ScrapeOps)
+
+Review sites and forums increasingly serve a captcha instead of content, and no amount of
+local browser tuning gets past DataDome or Cloudflare from a datacenter IP. Paste a
+[ScrapeOps](https://scrapeops.io) key into **Sidebar → Proxy fallback**, or set
+`SCRAPEOPS_API_KEY` in `.env`, and those pages are retried through rotating residential
+IPs.
+
+It is deliberately a fallback, not the default route: every proxied request costs credits,
+so it fires only when the local fetch fails outright or comes back holding an anti-bot
+interstitial. If the standard proxy pool is also refused, one further retry goes out on a
+residential IP, which costs more again — hence only after a real failure.
+
+Reddit is the exception and goes straight to the proxy, because it rejects every
+datacenter IP and a local attempt is pure latency. It is also fetched through Reddit's own
+JSON endpoint rather than the rendered page, which returns the post body and the full
+nested comment tree as structured data — cheaper and far more complete than scraping the
+infinite-scroll feed.
+
+The `Method` column in the Review tab and the exported workbook shows which path each page
+took: `crawl4ai`, `httpx-trafilatura`, `scrapeops`, or `scrapeops-reddit`.
 
 ## Web conflict resolution
 
