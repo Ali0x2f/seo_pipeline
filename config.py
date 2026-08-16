@@ -103,6 +103,15 @@ class Config:
         "SCRAPEOPS_RESIDENTIAL_RETRY", "1"
     ) not in ("0", "false", "False")
 
+    # --- Authentication ---
+    # Gates the whole UI behind a login form. Empty means no credentials configured, so
+    # the app keeps its previous open-by-default behaviour -- set one to require sign-in.
+    auth_username: str = os.getenv("AUTH_USERNAME", "admin")
+    auth_password: str = os.getenv("AUTH_PASSWORD", "")
+    # "alice:secret1,bob:secret2" for more than one account; each pair wins over the
+    # single username/password above for the user it names.
+    auth_users: str = os.getenv("AUTH_USERS", "")
+
     # --- Behaviour ---
     use_cache: bool = os.getenv("USE_CACHE", "1") not in ("0", "false", "False")
     reconcile_batch_size: int = _env_int("RECONCILE_BATCH_SIZE", 6)

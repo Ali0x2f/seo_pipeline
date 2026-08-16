@@ -63,6 +63,7 @@ def _install_chromium() -> tuple[bool, str]:
         return False, str(e)
 
 
+from auth import render_logout, require_login
 from config import RUNS_DIR, SCHEMA_DIR, Config
 from jobs import start_job
 from pipeline import cache as cache_mod
@@ -1523,8 +1524,9 @@ def tab_runs() -> None:
         "the last stage."
     )
 
-    # The client asked where runs live: there is no account, so say so plainly and name
-    # the actual folder rather than leaving it to be guessed.
+    # Say plainly where runs live and name the actual folder rather than leaving it to
+    # be guessed. Storage is shared across every signed-in user — there is no per-user
+    # isolation, even when a login is configured.
     s = get_settings()
     where = {
         "files": f"JSON files in `{RUNS_DIR}`",
@@ -1533,9 +1535,9 @@ def tab_runs() -> None:
     }[s.backend]
     st.info(
         f"Runs are saved on the machine running this app — currently {where}. "
-        "There is no login: anything listed here survives a refresh, a browser restart "
-        "and a reboot, and is only lost if those files are deleted. Change the location "
-        "in the **Storage** tab.",
+        "Storage is shared, not per-user: anything listed here survives a refresh, a "
+        "browser restart and a reboot, and is only lost if those files are deleted. "
+        "Change the location in the **Storage** tab.",
         icon="💾",
     )
 
@@ -2193,9 +2195,10 @@ def tab_help() -> None:
         switches this to a **database** — a local SQLite file (`data/runs.db`) or any
         server SQLAlchemy supports — and can copy runs between backends.
 
-        - **No login.**  Runs are not tied to an account or a browser session.  They are
-          files on the machine running the app, so they survive a refresh, a browser
-          restart and a reboot.  The **Saved runs** tab prints the exact folder.
+        - **Shared, not per-user.**  Runs are files on the machine running the app, not
+          tied to an account or a browser session, so they survive a refresh, a browser
+          restart and a reboot — and every signed-in user sees the same list.  The
+          **Saved runs** tab prints the exact folder.
         - **Backends** — `files`, `db`, or `both`.  `both` writes to JSON and the
           database at once, so a database outage can never lose a run.
         - **Databases** — Leave the URL blank for SQLite, or use a SQLAlchemy URL for a
@@ -2211,6 +2214,21 @@ def tab_help() -> None:
           run and restore from it.  Copying never deletes the source.
         - **Persistent** — Your choice is remembered in `storage.json`.  In Docker, the
           `data/` volume keeps the database across rebuilds.
+
+        ### Sign-in
+
+        The app opens directly unless an operator has set `AUTH_PASSWORD` (one account)
+        or `AUTH_USERS` (several, as `alice:secret1,bob:secret2`) in `.env`.  When set,
+        every visitor sees a sign-in form before anything else loads, and a **Sign out**
+        button appears at the top of the sidebar.
+
+        - **One shared workspace.**  There is no per-user data — every signed-in account
+          sees the same schemas, runs and cache.  Accounts only gate access to that one
+          workspace, they don't partition it.
+        - **Session-scoped.**  Signing in sets a flag for the current browser session;
+          closing the tab or restarting the app requires signing in again.
+        - **Configured like every other credential here** — in `.env` or the deploy
+          environment, never in a file the app writes to.
 
         ### Sidebar
 
@@ -2308,7 +2326,10 @@ def tab_help() -> None:
 
 
 def main() -> None:
+    if not require_login(Config()):
+        return
     init_state()
+    render_logout()
     render_sidebar()
 
     st.title("SEO Content Pipeline | Mike - RINGHEL")

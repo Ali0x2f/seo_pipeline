@@ -31,6 +31,13 @@ into the sidebar at runtime.
 .\.venv\Scripts\streamlit.exe run app.py
 ```
 
+### Authentication
+
+The app opens directly by default. To require sign-in — recommended for anything
+beyond local use — set `AUTH_PASSWORD` (single account, username defaults to `admin`)
+or `AUTH_USERS` (several accounts, `alice:secret1,bob:secret2`) in `.env`. There is no
+per-user data: accounts gate access to one shared workspace, they don't partition it.
+
 ### Docker
 
 ```powershell
@@ -234,10 +241,10 @@ on disk, keyed on everything that could change the result (URL, model, temperatu
 the prompt text itself). Tuning a question re-runs only the affected fields. Re-running an
 unchanged pipeline costs nothing.
 
-**Nothing is lost on refresh.** Every stage writes the full run to `runs/*.json`. There
-is no login and nothing is tied to the browser session: runs survive a refresh, a browser
-restart and a reboot, and are only lost if those files are deleted. Reopen any past run
-from the **Saved runs** tab, which prints the exact folder in use.
+**Nothing is lost on refresh.** Every stage writes the full run to `runs/*.json`. Runs
+are not tied to the browser session: they survive a refresh, a browser restart and a
+reboot, and are only lost if those files are deleted. Reopen any past run from the
+**Saved runs** tab, which prints the exact folder in use.
 
 ## System prompts and scenarios
 
