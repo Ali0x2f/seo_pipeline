@@ -1,4 +1,4 @@
-# SEO Content Pipeline
+# SEOForge Pipeline
 
 Turns a list of reference URLs into a structured comparison dataset — one row per
 product — with every claim traceable back to the page it came from.
