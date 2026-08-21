@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -63,12 +65,17 @@ class DiskCache:
         if not self.enabled:
             return
         p = self._path(key)
-        tmp = p.with_suffix(".tmp")
+        # Stages write from a thread pool, so the temp name carries the writer's id:
+        # a shared one would let two threads clobber each other's partial file.
+        tmp = p.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
         try:
             tmp.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
-            tmp.replace(p)   # atomic, so a crash mid-write cannot corrupt the entry
+            tmp.replace(p)  # atomic, so a crash mid-write cannot corrupt the entry
         except OSError:
-            pass
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
     def clear(self) -> int:
         if not self.dir.exists():

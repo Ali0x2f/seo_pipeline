@@ -137,14 +137,20 @@ def parse_input(
 
     headers = {c: _norm_header(c) for c in df.columns}
     product_col = node_col = url_col = key_col = None
+    # Each role is matched independently: a header can belong to more than one alias set
+    # ("fields" is both a key and a node name), and a second URL-ish column must not be
+    # mistaken for one of the others.
     for col, norm in headers.items():
         if url_col is None and norm in URL_ALIASES:
             url_col = col
-        elif key_col is None and norm in KEY_ALIASES:
+            continue
+        if key_col is None and norm in KEY_ALIASES:
             key_col = col
-        elif node_col is None and norm in NODE_ALIASES:
+            continue
+        if node_col is None and norm in NODE_ALIASES:
             node_col = col
-        elif product_col is None and norm in PRODUCT_ALIASES:
+            continue
+        if product_col is None and norm in PRODUCT_ALIASES:
             product_col = col
 
     if url_col is None:

@@ -25,8 +25,9 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
+import weakref
 from collections import defaultdict
-from typing import Callable, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable
 from urllib.parse import urlparse, urlunparse
 
 from config import Config
@@ -38,6 +39,9 @@ from pipeline.models import (
     InputRow,
     ScrapedPage,
 )
+
+if TYPE_CHECKING:
+    import httpx
 
 SCRAPE_CACHE_VERSION = 5
 PER_DOMAIN_DELAY_S = 1.0
@@ -102,16 +106,19 @@ def run_async(coro):
 # ------------------------------------------------------------- static (pre-check + fallback)
 
 # Shared httpx client for the static pre-checks — one pool for the whole batch avoids
-# tearing down and re-establishing connections on every URL.
-_static_client: "httpx.AsyncClient | None" = None
+# tearing down and re-establishing connections on every URL. Keyed by event loop:
+# every batch runs on a fresh one (see run_async), and a pooled connection belonging to
+# a closed loop fails with "Event loop is closed".
+_static_clients: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
 
 async def _get_static_client(cfg: Config) -> "httpx.AsyncClient":
-    global _static_client
-    if _static_client is None or _static_client.is_closed:
-        import httpx
+    import httpx
 
-        _static_client = httpx.AsyncClient(
+    loop = asyncio.get_running_loop()
+    client = _static_clients.get(loop)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(
             follow_redirects=True,
             timeout=cfg.request_timeout_s,
             headers={"User-Agent": cfg.user_agent, "Accept-Language": "en-US,en;q=0.9"},
@@ -121,7 +128,14 @@ async def _get_static_client(cfg: Config) -> "httpx.AsyncClient":
                 keepalive_expiry=30,
             ),
         )
-    return _static_client
+        _static_clients[loop] = client
+    return client
+
+
+async def _close_static_client() -> None:
+    client = _static_clients.pop(asyncio.get_running_loop(), None)
+    if client is not None and not client.is_closed:
+        await client.aclose()
 
 
 def _extract_text(html: str, url: str) -> tuple[str, str]:
@@ -300,6 +314,7 @@ async def _scrape_batch(
     if not pending:
         if proxy_first_task:
             await proxy_first_task
+        await _close_static_client()
         return out
 
     # ── phase 1: static pre-check (cheap, high concurrency) ────────
@@ -325,8 +340,9 @@ async def _scrape_batch(
     # Start the browser in the background — runs in parallel with static checks.
     browser_task = asyncio.create_task(AsyncWebCrawler(config=browser_cfg).__aenter__())
 
-    async def _static_one(url: str) -> dict | None:
-        """Returns a payload if static was sufficient, None if we need the browser."""
+    async def _static_one(url: str) -> tuple[dict, bool]:
+        """(payload, sufficient). A partial payload is still returned so the browser
+        stage can fall back to it when the render produces less."""
         payload: dict = {
             "url": url,
             "success": False,
@@ -349,8 +365,8 @@ async def _scrape_batch(
         # If static gave us enough content, accept it and skip the browser.
         if payload["success"] and len(payload["text"]) >= cfg.max_scrape_chars:
             await _record(url, payload, f"static ✓ {url}")
-            return payload
-        return None
+            return payload, True
+        return payload, False
 
     static_tasks = [asyncio.create_task(_static_one(u)) for u in pending]
     static_results = await asyncio.gather(*static_tasks)
@@ -358,12 +374,12 @@ async def _scrape_batch(
     # Collect URLs that still need the browser.
     browser_pending: list[str] = []
     static_payloads: dict[str, dict] = {}
-    for url, result in zip(pending, static_results):
-        if result is not None:
-            # static was sufficient — already stored in `out`
-            static_payloads[url] = result
-        else:
-            browser_pending.append(url)
+    for url, (payload, sufficient) in zip(pending, static_results):
+        if sufficient:
+            continue  # already recorded in `out`
+        browser_pending.append(url)
+        if payload["text"]:
+            static_payloads[url] = payload
 
     if not browser_pending:
         # Browser was warming up but nobody needs it — shut it down.
@@ -371,6 +387,7 @@ async def _scrape_batch(
         await crawler.__aexit__(None, None, None)
         if proxy_first_task:
             await proxy_first_task
+        await _close_static_client()
         return out
 
     if progress:
@@ -437,7 +454,7 @@ async def _scrape_batch(
             # Merge with static result if we have one — prefer browser content
             # but keep static as fallback when the browser returned nothing useful.
             static = static_payloads.get(url)
-            if static and len(payload["text"]) < len(static["text"]):
+            if static and len(payload["text"] or "") < len(static["text"]):
                 payload["title"] = payload["title"] or static["title"]
                 payload["text"] = static["text"]
                 payload["fetch_method"] = (
@@ -462,6 +479,7 @@ async def _scrape_batch(
         await crawler.__aexit__(None, None, None)
         if proxy_first_task:
             await proxy_first_task
+        await _close_static_client()
 
     return out
 

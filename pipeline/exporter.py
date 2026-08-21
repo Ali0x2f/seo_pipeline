@@ -194,9 +194,11 @@ def to_excel(sheets: dict[str, pd.DataFrame]) -> bytes:
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         for name, df in sheets.items():
             safe = name[:31] or "Sheet"
-            (df if not df.empty else pd.DataFrame({"(empty)": []})).to_excel(
-                writer, index=False, sheet_name=safe
-            )
+            # A frame with columns but no rows still exports its headers; only a
+            # completely shapeless frame needs a placeholder.
+            if df.empty and len(df.columns) == 0:
+                df = pd.DataFrame({"(empty)": []})
+            df.to_excel(writer, index=False, sheet_name=safe)
             ws = writer.sheets[safe]
             for i, col in enumerate(df.columns, start=1):
                 width = min(60, max(14, len(str(col)) + 4))

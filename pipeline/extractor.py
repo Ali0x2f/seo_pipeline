@@ -266,9 +266,22 @@ def extract_pages(
 
     done = 0
     with ThreadPoolExecutor(max_workers=max(1, cfg.llm_concurrency)) as pool:
-        futures = [pool.submit(work, i) for i in range(len(pages))]
+        futures = {pool.submit(work, i): i for i in range(len(pages))}
         for fut in as_completed(futures):
-            i, ext = fut.result()
+            try:
+                i, ext = fut.result()
+            except (
+                Exception
+            ) as e:  # noqa: BLE001 - one bad page must not lose the batch
+                i = futures[fut]
+                page = pages[i]
+                ext = SourceExtraction(
+                    product=page.product,
+                    url=page.url,
+                    node=page.node,
+                    model=provider.model,
+                    error=f"{type(e).__name__}: {e}",
+                )
             results[i] = ext
             done += 1
             if ext.error:

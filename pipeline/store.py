@@ -329,8 +329,11 @@ def runs_signature() -> tuple:
     if s.uses_files:
         parts.append(files_signature())
     if s.uses_db:
-        db = get_db(s)
-        parts.append(db.signature() if db is not None else ())
+        try:
+            db = get_db(s)
+            parts.append(db.signature() if db is not None else ())
+        except Exception as e:  # noqa: BLE001 - a bad URL must not break rendering
+            parts.append(("db-error", str(e)[:200]))
     return tuple(parts)
 
 
