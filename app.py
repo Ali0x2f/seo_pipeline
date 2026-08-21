@@ -910,10 +910,73 @@ def tab_schema() -> None:
 def tab_input() -> None:
     st.subheader("Reference URLs")
     st.caption(
-        "One row per URL: which product it describes and which fields it answers. "
-        "Usually you just press *Seed input from schema* — the brief already lists the "
-        "URLs. Columns are matched loosely and the URL column is detected by content."
+        "One row per URL: which product it describes and, optionally, which fields it "
+        "answers. Usually you just press *Seed input from schema* — the brief already "
+        "lists the URLs. See *What input is expected* below for the sheet format."
     )
+
+    with st.expander("What input is expected"):
+        st.markdown("""
+**One row per URL.** CSV, TSV, Excel (`.xlsx`/`.xls`) or pasted text, always with a
+header row. Only the URL is genuinely required — everything else has a fallback.
+
+```csv
+Product,Key,URL
+n8n,pricing_format,https://n8n.io/pricing/
+n8n,"strengths,limitations",https://example.com/n8n-review
+Zapier,pricing_format,https://zapier.com/pricing
+```
+
+| Column | Required | What it does |
+| --- | --- | --- |
+| **URL** | Yes | The page to fetch. Must contain `http://` or `https://`. |
+| **Product** | Only if no default | Which product the page describes. Leave it out and every row is assigned the *Default product name* above. |
+| **Key** | No | Schema field key(s) this URL answers. Put several in one cell separated by comma, semicolon, pipe or newline. |
+| **Node** | No | Legacy topic label. Ignored unless the loaded schema declares `nodes` — brief-imported schemas do not, so you can omit it. |
+
+**Header names are matched loosely,** so pasting straight from a spreadsheet works:
+
+- URL: `url`, `urls`, `link`, `links`, `uri`, `source`, `source url`, `source urls`, `page`, `address`, `href`, `reference`
+- Product: `product`, `products`, `tool`, `platform`, `vendor`, `entity`, `subject`, `alternative`, `alternative name`, `name`, `company`, `app`
+- Key: `key`, `keys`, `field key`, `field keys`, `fields`
+- Node: `node`, `nodes`, `category`, `categories`, `section`, `topic`, `group`, `type`, `aspect`, `dimension`
+
+Extra columns are ignored. If no header matches, the column holding the most links is
+used as the URL column and you get a warning saying which one was picked.
+
+**Routing** — which fields a page is asked about, most explicit first:
+
+1. The `Key` column, when it names keys that exist in the schema.
+2. Otherwise the schema's own *source urls* for that URL.
+3. Otherwise `Node`, but only for a schema that declares nodes.
+4. Otherwise the page is tried against every field, so nothing is silently dropped.
+
+**Duplicates are merged.** The same product + URL on several rows becomes one row with
+the keys combined — one fetch and one extraction call, however many fields it answers.
+
+**A row is skipped** (with a warning) when its URL cell is not a link, or when it has no
+product name and no default is set. Loading fails outright if no URL column can be found,
+or if there is no product column and no default product name.
+
+Two shorter forms also work — bare URLs, routed entirely by the schema's *source urls*:
+
+```csv
+URL
+https://n8n.io/pricing/
+https://zapier.com/pricing
+```
+
+…and the legacy node sheet, which is what the bundled sample uses:
+
+```csv
+Product,Node,URL
+n8n,Pricing,https://n8n.io/pricing/
+n8n,Capabilities,https://www.scalahosting.com/blog/what-is-n8n-and-how-to-use-it/
+```
+
+Fields marked *custom input* in the schema need no row here at all — the pasted text is
+added as its own source when the run starts.
+""")
 
     spec = current_spec()
     src = st.radio(
@@ -969,9 +1032,9 @@ def tab_input() -> None:
             placeholder=(
                 "Product\tKey\tURL\n" "n8n\tpricing_format\thttps://n8n.io/pricing/"
             ),
-            help="A 'Key' column names the fields a URL answers; repeat the URL on "
-            "several rows, or list keys separated by commas. Without it, the schema's "
-            "own source urls decide.",
+            help="Only the URL column is required. An optional 'Key' column names the "
+            "fields a URL answers — repeat the URL on several rows, or list keys "
+            "separated by commas. Without it, the schema's own source urls decide.",
         )
         if pasted.strip():
             data, filename = pasted, "pasted.tsv"
@@ -2134,7 +2197,7 @@ def tab_help() -> None:
         | Tab | What you do |
         |---|---|
         | **Schema** | Edit the content brief — fields, questions, source URLs and pasted evidence.  Saved as YAML. |
-        | **Input** | Usually just *Seed input from schema*.  Or upload a sheet with Product, Key and URL columns. |
+        | **Input** | Usually just *Seed input from schema*.  Or upload a sheet — a URL column is the only requirement, with optional Product and Key columns. |
         | **Run** | Choose stages, see the preflight (cost + coverage), and start the pipeline. |
         | **Review** | Inspect conflicts, trace provenance, check coverage. |
         | **Export** | Download the workbook. |
